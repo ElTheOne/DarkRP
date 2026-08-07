@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "rom_base_url": "https://roms.example.com/arcade/roms/",
+  "player_page_url": "https://roms.example.com/arcade/player/",
+  "emulator_data_url": "https://cdn.emulatorjs.org/4.2.0/data/",
+  "allow_http": false,
+  "force_legacy_cores": true,
+  "stream": {
+    "fps": 1,
+    "width": 256,
+    "height": 192,
+    "jpeg_quality": 30,
+    "max_frame_bytes": 24576,
+    "max_viewers_per_machine": 8,
+    "max_active_streams": 4,
+    "max_relay_bytes_per_second": 262144
+  },
+  "games": [
+    {
+      "id": "homebrew_demo",
+      "title": "N64 Homebrew Demo",
+      "core": "n64",
+      "rom_file": "homebrew-demo.z64",
+      "game_id": 1001,
+      "enabled": true
+    }
+  ]
+}

@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "steam_web_api_key": "",
+  "steam_refresh_seconds": 86400,
+  "network_refresh_seconds": 21600,
+  "vpn": {
+    "lookup_url": "https://your-network-provider.example/check?ip={ip}",
+    "headers": {
+      "Authorization": "Bearer REPLACE_ME"
+    },
+    "boolean_paths": [
+      "vpn",
+      "proxy",
+      "security.vpn",
+      "security.proxy"
+    ]
+  },
+  "discord": {
+    "link_url": "https://your-link-service.example/discord/start?steamid={steamid}&token={token}&signature={signature}",
+    "verify_url": "https://your-link-service.example/discord/status?steamid={steamid}&token={token}",
+    "member_status_url": "https://your-link-service.example/discord/member-status?steamid={steamid}&channel_id={channel_id}",
+    "unlink_url": "https://your-link-service.example/discord/unlink?steamid={steamid}&discord_id={discord_id}",
+    "bot_start_url": "https://your-link-service.example/discord/bot/start?steamid={steamid}&token={token}&code={code}&channel_id={channel_id}",
+    "bot_invite_url": "https://your-link-service.example/discord/bot/invite?channel_id={channel_id}",
+    "bot_heartbeat_url": "https://your-link-service.example/discord/bot/heartbeat?name={name}&map={map}&players={players}&max={max}&channel_id={channel_id}",
+    "bot_offline_url": "https://your-link-service.example/discord/bot/offline",
+    "bot_chat_url": "https://your-link-service.example/discord/bot/chat",
+    "bot_inbox_url": "https://your-link-service.example/discord/bot/inbox?channel_id={channel_id}",
+    "global_chat_channel_id": "REPLACE_WITH_DISCORD_CHANNEL_ID",
+    "role_required": true,
+    "verification_timeout_seconds": 600,
+    "headers": {
+      "Authorization": "Bearer REPLACE_ME"
+    },
+    "link_secret": "REPLACE_WITH_A_LONG_RANDOM_SECRET"
+  }
+}

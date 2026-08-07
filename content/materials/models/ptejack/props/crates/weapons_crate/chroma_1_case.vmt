@@ -1,0 +1,5 @@
+"VertexlitGeneric"
+{
+	"$basetexture" "models/ptejack/props/crates/chroma"
+	"$alphatest" 1
+}

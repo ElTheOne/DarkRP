@@ -1,0 +1,31 @@
+# macOS metadata and removable-drive AppleDouble files
+.DS_Store
+._*
+**/._*
+
+# Local secrets and machine-specific configuration
+.env
+.env.*
+!.env.example
+*.local.json
+mysql.json
+trust.json
+arcade.json
+
+# Cloudflare local state and generated dependencies
+deploy/discord-worker/node_modules/
+deploy/discord-worker/.wrangler/
+deploy/discord-worker/worker-configuration.d.ts
+*.cpuprofile
+
+# Emulator build checkout/cache; deployable web output remains tracked
+deploy/megadrive-build-cache/
+
+# Runtime and editor debris
+*.log
+*.tmp
+*.swp
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+

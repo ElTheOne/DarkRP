@@ -1,0 +1,41 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "darkrp-discord-link",
+	"main": "src/index.js",
+	"compatibility_date": "2026-07-26",
+	"compatibility_flags": [
+		"nodejs_compat"
+	],
+	"workers_dev": true,
+	"observability": {
+		"enabled": true
+	},
+	"kv_namespaces": [
+		{
+			"binding": "DRP_LINKS",
+			"id": "2a28c12e61b54a9ba249188a85934b8f"
+		}
+	],
+	"r2_buckets": [
+		{
+			"binding": "DRP_ARCADE",
+			"bucket_name": "darkrp-arcade"
+		}
+	],
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "BOT_PRESENCE",
+				"class_name": "BotPresence"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": [
+				"BotPresence"
+			]
+		}
+	]
+}

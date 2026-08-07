@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>DarkRP N64 Arcade</title>
+  <style>
+    :root { color-scheme: dark; --cyan:#43d8ff; --green:#5ee1b1; --panel:#081326; }
+    * { box-sizing:border-box; }
+    html, body, #game { width:100%; height:100%; margin:0; overflow:hidden; background:#030713; }
+    body { font-family:Inter,system-ui,sans-serif; color:#fff; }
+    #boot {
+      position:fixed; z-index:20; left:18px; top:16px; max-width:calc(100% - 36px);
+      padding:11px 15px; border-left:4px solid var(--cyan); border-radius:3px;
+      background:rgba(8,19,38,.94); box-shadow:0 14px 45px rgba(0,0,0,.4);
+      letter-spacing:.08em; font-size:12px; font-weight:800; text-transform:uppercase;
+    }
+    #boot small { display:block; margin-top:5px; color:#91a9ca; letter-spacing:.03em; font-weight:600; text-transform:none; }
+    #error { color:#ff879b; }
+    #external {
+      display:none; position:absolute; top:0; right:0; bottom:0; left:0; align-items:center; justify-content:center;
+      padding:32px; background:radial-gradient(circle at 50% 30%,#10264a 0,#050914 62%);
+    }
+    #external-card {
+      width:560px; max-width:calc(100% - 64px); padding:30px; border:1px solid rgba(67,216,255,.28);
+      border-radius:14px; background:rgba(8,19,38,.96); box-shadow:0 24px 80px rgba(0,0,0,.55);
+      text-align:center;
+    }
+    #external-card h1 { margin:0 0 12px; font-size:24px; }
+    #external-card p { margin:0 auto 22px; max-width:470px; color:#a9bad3; line-height:1.55; }
+    #open-external {
+      padding:13px 22px; border:0; border-radius:8px; color:#03111b; background:linear-gradient(90deg,var(--cyan),var(--green));
+      font:800 12px Inter,system-ui,sans-serif; letter-spacing:.08em; text-transform:uppercase; cursor:pointer;
+    }
+    #external-card small { display:block; margin-top:16px; color:#7288a8; }
+  </style>
+</head>
+<body>
+  <div id="boot">DarkRP N64 Arcade<small>Preparing clientside emulation…</small></div>
+  <div id="game"></div>
+  <div id="external">
+    <div id="external-card">
+      <h1>Browser compatibility required</h1>
+      <p>Garry's Mod cannot provide WebGL on this Mac. Open this game in your normal browser, where the N64 renderer can start correctly.</p>
+      <button id="open-external" type="button">Open game in browser</button>
+      <small>The ROM remains server-hosted and emulation still runs on your computer.</small>
+    </div>
+  </div>
+  <script>
+    (function () {
+      function readQuery() {
+        var result = {};
+        var source = location.search.charAt(0) === "?" ? location.search.slice(1) : location.search;
+        var pairs = source ? source.split("&") : [];
+        for (var index = 0; index < pairs.length; index++) {
+          var pair = pairs[index].split("=");
+          var key = decodeURIComponent(pair.shift() || "");
+          result[key] = decodeURIComponent(pair.join("=") || "");
+        }
+        return result;
+      }
+      var params = readQuery();
+      var boot = document.getElementById("boot");
+      window.onerror = function (message, source, line, column) {
+        var locationText = String(source || "inline") + ":" + String(line || 0) + ":" + String(column || 0);
+        console.error("DRP arcade runtime error | " + String(message || "unknown") + " | " + locationText);
+        return false;
+      };
+      var rom = params.rom || "";
+      var data = params.data || "https://cdn.emulatorjs.org/4.2.0/data/";
+      var title = (params.title || "N64 Game").slice(0, 80);
+      var core = "n64";
+      var gameID = Math.max(1, Math.min(2147483647, Number(params.id) || 1));
+      var hasWebAssembly = typeof window.WebAssembly === "object";
+      var hasWebGL = false;
+      var hasStorage = false;
+      var isMac = /Macintosh|Mac OS X/i.test(String(navigator.userAgent || ""));
+      function probeWebGL(contextName) {
+        var canvas = document.createElement("canvas");
+        var context = null;
+        canvas.width = 2;
+        canvas.height = 2;
+        canvas.style.position = "absolute";
+        canvas.style.left = "-10000px";
+        document.body.appendChild(canvas);
+        try {
+          context = canvas.getContext(contextName);
+        } catch (ignored) {}
+        document.body.removeChild(canvas);
+        return !!context;
+      }
+      hasWebGL = probeWebGL("webgl2") || probeWebGL("webgl") || probeWebGL("experimental-webgl");
+      try {
+        localStorage.setItem("drp_arcade_probe", "1");
+        localStorage.removeItem("drp_arcade_probe");
+        hasStorage = !!window.indexedDB;
+      } catch (ignored) {}
+
+      if (!/^https?:\/\//i.test(rom) || !/^https?:\/\//i.test(data)) {
+        boot.id = "error";
+        boot.textContent = "Arcade configuration error";
+        var detail = document.createElement("small");
+        detail.textContent = "The ROM or EmulatorJS data URL is invalid.";
+        boot.appendChild(detail);
+        return;
+      }
+      if (!hasWebAssembly) {
+        boot.id = "error";
+        boot.textContent = "This GMod browser is missing WebAssembly";
+        var capabilityDetail = document.createElement("small");
+        capabilityDetail.textContent = "GMod's x86-64 Chromium branch is required for the emulator core.";
+        boot.appendChild(capabilityDetail);
+        return;
+      }
+      if (!hasWebGL && isMac) {
+        boot.style.display = "none";
+        document.getElementById("external").style.display = "flex";
+        document.getElementById("open-external").onclick = function () {
+          if (window.drpArcade && typeof window.drpArcade.openExternal === "function") {
+            window.drpArcade.openExternal(location.href);
+            return;
+          }
+          window.open(location.href, "_blank");
+        };
+        console.error("DRP arcade compatibility fallback | build=v7.1-macos-fallback"
+          + " | webassembly=" + String(hasWebAssembly)
+          + " | webgl=" + String(hasWebGL)
+          + " | userAgent=" + String(navigator.userAgent || "unknown"));
+        return;
+      }
+
+      document.title = title + " — DarkRP N64 Arcade";
+      boot.textContent = title;
+      var hint = document.createElement("small");
+      hint.textContent = !hasWebGL
+        ? "WebGL preflight was unavailable; attempting Chromium compatibility mode."
+        : hasStorage
+          ? "Client save storage ready. Click the screen if emulation pauses during startup."
+          : "Warning: client save storage is unavailable in this browser.";
+      boot.appendChild(hint);
+      window.EJS_player = "#game";
+      window.EJS_core = core;
+      window.EJS_gameUrl = rom;
+      window.EJS_gameName = title;
+      window.EJS_gameID = gameID;
+      window.EJS_pathtodata = data.charAt(data.length - 1) === "/" ? data : data + "/";
+      window.EJS_startOnLoaded = true;
+      window.EJS_forceLegacyCores = params.legacy !== "0";
+      window.EJS_threads = false;
+      // GMod's Chromium can retain an older downloaded core in IndexedDB even
+      // after EJS_paths changes. Core/ROM caching is disabled so this page always
+      // executes our CEF-compatible wrapper. Save states use a separate database.
+      window.EJS_disableDatabases = true;
+      // Ignore a previously selected parallel_n64 core. EmulatorJS stores that
+      // choice in localStorage separately from browser save states.
+      window.EJS_disableLocalStorage = true;
+      window.EJS_defaultOptions = { retroarch_core:"mupen64plus_next" };
+      window.EJS_paths = {
+        "mupen64plus_next.json": location.origin + "/arcade/compat/v3/mupen64plus_next.json",
+        "mupen64plus_next-wasm.data": location.origin + "/arcade/compat/v3/mupen64plus_next-legacy-wasm.data",
+        "mupen64plus_next-legacy-wasm.data": location.origin + "/arcade/compat/v3/mupen64plus_next-legacy-wasm.data"
+      };
+      window.EJS_fixedSaveInterval = 60000;
+      window.EJS_CacheLimit = 536870912;
+      window.EJS_cacheConfig = { enabled:true, cacheMaxSizeMB:512, cacheMaxAgeMins:10080 };
+      window.EJS_Buttons = { fullscreen:false, screenRecord:false, cacheManager:false };
+      console.error("DRP arcade compatibility v5.2 | core=" + window.EJS_core
+        + " | legacy=" + String(window.EJS_forceLegacyCores)
+        + " | coreCache=" + String(!window.EJS_disableDatabases)
+        + " | settingsCache=" + String(!window.EJS_disableLocalStorage)
+        + " | selectedCore=" + window.EJS_defaultOptions.retroarch_core
+        + " | report=" + window.EJS_paths["mupen64plus_next.json"]
+        + " | archive=" + window.EJS_paths["mupen64plus_next-legacy-wasm.data"]);
+      console.error("DRP arcade error diagnostics | build=v7.1-macos-fallback"
+        + " | data=" + window.EJS_pathtodata
+        + " | compat=" + window.EJS_paths["mupen64plus_next-legacy-wasm.data"]
+        + " | webassembly=" + String(hasWebAssembly)
+        + " | webgl=" + String(hasWebGL)
+        + " | mac=" + String(isMac)
+        + " | storage=" + String(hasStorage)
+        + " | userAgent=" + String(navigator.userAgent || "unknown"));
+      window.EJS_ready = function () {
+        if (boot && boot.parentNode) boot.parentNode.removeChild(boot);
+      };
+      window.EJS_onGameStart = window.EJS_ready;
+
+      var loader = document.createElement("script");
+      loader.src = window.EJS_pathtodata + "loader.js";
+      loader.onerror = function () {
+        boot.id = "error";
+        boot.textContent = "EmulatorJS failed to load";
+        var detail = document.createElement("small");
+        detail.textContent = "Check HTTPS, CORS and the configured data URL.";
+        boot.appendChild(detail);
+      };
+      document.body.appendChild(loader);
+    }());
+  </script>
+</body>
+</html>

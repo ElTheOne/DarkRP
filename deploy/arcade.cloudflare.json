@@ -1,0 +1,76 @@
+{
+  "version": 2,
+  "rom_base_url": "https://darkrp-discord-link.tcv2y2cdj7.workers.dev/arcade/roms/",
+  "player_page_url": "https://darkrp-discord-link.tcv2y2cdj7.workers.dev/arcade/player/megadrive/v3/index.html",
+  "emulator_data_url": "https://cdn.emulatorjs.org/4.2.0/data/",
+  "allow_http": false,
+  "force_legacy_cores": true,
+  "stream": {
+    "fps": 1,
+    "width": 256,
+    "height": 192,
+    "jpeg_quality": 30,
+    "max_frame_bytes": 24576,
+    "max_viewers_per_machine": 8,
+    "max_active_streams": 4,
+    "max_relay_bytes_per_second": 262144
+  },
+  "games": [
+    {
+      "id": "super_mario_64",
+      "title": "Super Mario 64",
+      "core": "n64",
+      "rom_file": "super-mario-64.z64",
+      "game_id": 1001,
+      "enabled": false
+    },
+    {
+      "id": "donkey_kong_64",
+      "title": "Donkey Kong 64",
+      "core": "n64",
+      "rom_file": "donkey-kong-64.z64",
+      "game_id": 1002,
+      "enabled": false
+    },
+    {
+      "id": "ocarina_of_time",
+      "title": "The Legend of Zelda: Ocarina of Time",
+      "core": "n64",
+      "rom_file": "ocarina-of-time.z64",
+      "game_id": 1003,
+      "enabled": false
+    },
+    {
+      "id": "example_megadrive",
+      "title": "Add Your Mega Drive ROM",
+      "core": "megadrive",
+      "rom_file": "replace-this-with-your-rom.md",
+      "game_id": 2001,
+      "enabled": false
+    },
+    {
+      "id": "sonic_the_hedgehog",
+      "title": "Sonic the Hedgehog",
+      "core": "megadrive",
+      "rom_file": "sonic-the-hedgehog.md",
+      "game_id": 2101,
+      "enabled": true
+    },
+    {
+      "id": "sonic_the_hedgehog_2",
+      "title": "Sonic the Hedgehog 2",
+      "core": "megadrive",
+      "rom_file": "sonic-the-hedgehog-2.md",
+      "game_id": 2102,
+      "enabled": true
+    },
+    {
+      "id": "streets_of_rage_3",
+      "title": "Streets of Rage 3",
+      "core": "megadrive",
+      "rom_file": "streets-of-rage-3.md",
+      "game_id": 2103,
+      "enabled": true
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "host": "192.168.5.2",
+  "port": 3306,
+  "username": "darkrp_app",
+  "password": "replace-me",
+  "database": "darkrp"
+}

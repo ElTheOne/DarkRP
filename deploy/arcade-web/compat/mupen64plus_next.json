@@ -1,0 +1,8 @@
+{
+  "core": "mupen64plus_next",
+  "buildStart": "drp-macos-cef-scalar-2026-07-26-v3",
+  "buildEnd": "drp-macos-cef-scalar-2026-07-26-v3",
+  "options": {
+    "defaultWebGL2": false
+  }
+}

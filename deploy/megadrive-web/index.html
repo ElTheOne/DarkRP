@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>DarkRP Mega Drive Arcade</title>
+  <style>
+    * { box-sizing:border-box; }
+    html,body { width:100%; height:100%; margin:0; overflow:hidden; background:#030713; color:#fff; }
+    body { font-family:Arial,sans-serif; }
+    #stage { position:absolute; top:0; right:0; bottom:0; left:0; display:flex; align-items:center; justify-content:center; }
+    #screen { width:100%; height:100%; object-fit:contain; image-rendering:pixelated; background:#000; }
+    #status {
+      position:absolute; z-index:4; left:18px; top:16px; max-width:calc(100% - 36px);
+      padding:11px 15px; border-left:4px solid #43d8ff; border-radius:3px;
+      background:rgba(8,19,38,.95); box-shadow:0 14px 45px rgba(0,0,0,.45);
+      letter-spacing:.08em; font-size:12px; font-weight:bold; text-transform:uppercase;
+    }
+    #status small { display:block; margin-top:5px; color:#91a9ca; letter-spacing:.03em; font-weight:normal; text-transform:none; }
+    #controls {
+      position:absolute; z-index:3; right:16px; bottom:14px; padding:9px 12px;
+      border-radius:4px; background:rgba(8,19,38,.88); color:#91a9ca; font-size:11px;
+    }
+    #controls a { margin-left:12px; color:#5ee1b1; text-decoration:none; }
+    #resume {
+      display:none; position:absolute; z-index:5; left:50%; top:50%; width:260px; height:52px;
+      margin-left:-130px; margin-top:-26px; border:0; border-radius:7px;
+      color:#03111b; background:#5ee1b1; font-weight:bold; cursor:pointer;
+    }
+  </style>
+</head>
+<body>
+  <div id="stage"><canvas id="screen" width="320" height="224"></canvas></div>
+  <div id="status">DarkRP Mega Drive<small id="detail">Downloading emulator…</small></div>
+  <div id="controls">ARROWS MOVE · Z/X/C = A/B/C · A/S/D = X/Y/Z · ENTER START <a href="source.tar.gz" target="_blank">SOURCE &amp; LICENSE</a></div>
+  <button id="resume" type="button">CLICK TO ENABLE AUDIO</button>
+  <script>
+    window.DRPMegaDriveRuntimeError = "";
+    window.addEventListener("error", function (event) {
+      if (!window.DRPMegaDriveRuntimeError) {
+        window.DRPMegaDriveRuntimeError = String(event.message || "Runtime script error");
+      }
+    });
+  </script>
+  <script src="megadrive.js" onerror="window.DRPMegaDriveRuntimeError='megadrive.js request failed'"></script>
+  <script>
+    (function () {
+      "use strict";
+      function query() {
+        var values = {};
+        var source = location.search.charAt(0) === "?" ? location.search.slice(1) : location.search;
+        var pairs = source ? source.split("&") : [];
+        var index;
+        for (index = 0; index < pairs.length; index++) {
+          var pair = pairs[index].split("=");
+          var key = decodeURIComponent(pair.shift() || "");
+          values[key] = decodeURIComponent(pair.join("=") || "");
+        }
+        return values;
+      }
+      function extension(url) {
+        var clean = String(url || "").split("?")[0].split("#")[0];
+        var dot = clean.lastIndexOf(".");
+        return dot >= 0 ? clean.slice(dot + 1).toLowerCase() : "md";
+      }
+      function loadBinary(url, success, failure) {
+        var request = new XMLHttpRequest();
+        request.open("GET", url, true);
+        request.responseType = "arraybuffer";
+        request.onload = function () {
+          if (request.status >= 200 && request.status < 300 && request.response) success(request.response);
+          else failure(new Error("ROM download returned HTTP " + request.status));
+        };
+        request.onerror = function () { failure(new Error("ROM download failed")); };
+        request.send();
+      }
+      function bytesToBase64(bytes) {
+        var output = "";
+        var offset;
+        var limit;
+        var index;
+        for (offset = 0; offset < bytes.length; offset += 8192) {
+          limit = Math.min(bytes.length, offset + 8192);
+          for (index = offset; index < limit; index++) output += String.fromCharCode(bytes[index]);
+        }
+        return btoa(output);
+      }
+      function base64ToBytes(value) {
+        var decoded = atob(value);
+        var bytes = new Uint8Array(decoded.length);
+        var index;
+        for (index = 0; index < decoded.length; index++) bytes[index] = decoded.charCodeAt(index);
+        return bytes;
+      }
+
+      var params = query();
+      var romURL = params.rom || "";
+      var gameID = String(params.id || "megadrive");
+      var title = String(params.title || "Mega Drive Game").slice(0, 80);
+      var canvas = document.getElementById("screen");
+      var context = canvas.getContext("2d");
+      var status = document.getElementById("status");
+      var detail = document.getElementById("detail");
+      var resume = document.getElementById("resume");
+      var module = null;
+      var running = false;
+      var lastTime = 0;
+      var accumulator = 0;
+      var frameDuration = 1000 / 60;
+      var image = null;
+      var keys = {};
+      var audioContext = null;
+      var audioNode = null;
+      var audioRingSize = 65536;
+      var audioLeft = new Float32Array(audioRingSize);
+      var audioRight = new Float32Array(audioRingSize);
+      var audioRead = 0;
+      var audioWrite = 0;
+      var audioAvailable = 0;
+      var saveKey = "drp_megadrive_sram_" + gameID;
+      var saveTimer = 0;
+
+      function fail(error) {
+        running = false;
+        status.style.borderLeftColor = "#ff6f91";
+        status.firstChild.nodeValue = "Mega Drive failed";
+        detail.textContent = String(error && error.message ? error.message : error);
+        console.error("[DRP MEGADRIVE] " + detail.textContent);
+      }
+      function inputMask() {
+        var mask = 0;
+        if (keys[38]) mask |= 1 << 4;
+        if (keys[40]) mask |= 1 << 5;
+        if (keys[37]) mask |= 1 << 6;
+        if (keys[39]) mask |= 1 << 7;
+        if (keys[13]) mask |= 1 << 3;
+        if (keys[90]) mask |= 1 << 1;
+        if (keys[88]) mask |= 1 << 0;
+        if (keys[67]) mask |= 1 << 8;
+        if (keys[65]) mask |= 1 << 10;
+        if (keys[83]) mask |= 1 << 9;
+        if (keys[68]) mask |= 1 << 11;
+        return mask;
+      }
+      function initAudio(sampleRate) {
+        var Audio = window.AudioContext || window.webkitAudioContext;
+        if (!Audio) return;
+        try {
+          audioContext = new Audio({ sampleRate:Math.round(sampleRate || 44100) });
+        } catch (ignored) {
+          audioContext = new Audio();
+        }
+        audioNode = audioContext.createScriptProcessor(2048, 0, 2);
+        audioNode.onaudioprocess = function (event) {
+          var left = event.outputBuffer.getChannelData(0);
+          var right = event.outputBuffer.getChannelData(1);
+          var index;
+          for (index = 0; index < left.length; index++) {
+            if (audioAvailable > 0) {
+              left[index] = audioLeft[audioRead];
+              right[index] = audioRight[audioRead];
+              audioRead = (audioRead + 1) % audioRingSize;
+              audioAvailable--;
+            } else {
+              left[index] = 0;
+              right[index] = 0;
+            }
+          }
+        };
+        audioNode.connect(audioContext.destination);
+        if (audioContext.state === "suspended") resume.style.display = "block";
+      }
+      function pushAudio() {
+        var frames = module._md_audio_frames();
+        var pointer = module._md_audio_pointer();
+        var samples;
+        var index;
+        if (!frames || !pointer || !audioContext) return;
+        samples = new Int16Array(module.HEAPU8.buffer, pointer, frames * 2);
+        for (index = 0; index < frames; index++) {
+          if (audioAvailable >= audioRingSize) {
+            audioRead = (audioRead + 1) % audioRingSize;
+            audioAvailable--;
+          }
+          audioLeft[audioWrite] = samples[index * 2] / 32768;
+          audioRight[audioWrite] = samples[index * 2 + 1] / 32768;
+          audioWrite = (audioWrite + 1) % audioRingSize;
+          audioAvailable++;
+        }
+      }
+      function drawFrame() {
+        var width = module._md_frame_width();
+        var height = module._md_frame_height();
+        var pointer = module._md_frame_pointer();
+        var source;
+        if (!pointer || !width || !height) return;
+        if (canvas.width !== width || canvas.height !== height || !image) {
+          canvas.width = width;
+          canvas.height = height;
+          image = context.createImageData(width, height);
+        }
+        source = new Uint8ClampedArray(module.HEAPU8.buffer, pointer, width * height * 4);
+        image.data.set(source);
+        context.putImageData(image, 0, 0);
+      }
+      function loadSave() {
+        var pointer = module._md_sram_pointer();
+        var size = module._md_sram_size();
+        var stored;
+        var bytes;
+        if (!pointer || !size) return;
+        try {
+          stored = localStorage.getItem(saveKey);
+          if (!stored) return;
+          bytes = base64ToBytes(stored);
+          module.HEAPU8.set(bytes.subarray(0, size), pointer);
+        } catch (error) {
+          console.error("[DRP MEGADRIVE] Save load failed: " + String(error));
+        }
+      }
+      function saveGame() {
+        var pointer;
+        var size;
+        var bytes;
+        if (!module || !running) return;
+        pointer = module._md_sram_pointer();
+        size = module._md_sram_size();
+        if (!pointer || !size) return;
+        try {
+          bytes = new Uint8Array(module.HEAPU8.buffer, pointer, size);
+          localStorage.setItem(saveKey, bytesToBase64(bytes));
+        } catch (error) {
+          console.error("[DRP MEGADRIVE] Save write failed: " + String(error));
+        }
+      }
+      function loop(now) {
+        var steps = 0;
+        if (!running) return;
+        if (!lastTime) lastTime = now;
+        accumulator += Math.min(100, now - lastTime);
+        lastTime = now;
+        module._md_set_input(0, inputMask());
+        while (accumulator >= frameDuration && steps < 3) {
+          module._md_run_frame();
+          pushAudio();
+          accumulator -= frameDuration;
+          steps++;
+        }
+        drawFrame();
+        if (now >= saveTimer) {
+          saveTimer = now + 30000;
+          saveGame();
+        }
+        requestAnimationFrame(loop);
+      }
+      function start(arrayBuffer) {
+        var bytes;
+        var pointer;
+        detail.textContent = "Starting software renderer…";
+        DRPMegaDriveCore({
+          locateFile:function (path) { return path; },
+          printErr:function (text) { console.error("[DRP MEGADRIVE CORE] " + text); }
+        }).then(function (loadedModule) {
+          module = loadedModule;
+          bytes = new Uint8Array(arrayBuffer);
+          pointer = module._malloc(bytes.length);
+          if (!pointer) throw new Error("Unable to allocate ROM memory");
+          module.HEAPU8.set(bytes, pointer);
+          if (!module.ccall("md_load", "number", ["number", "number", "string"], [pointer, bytes.length, extension(romURL)])) {
+            throw new Error("Genesis Plus GX rejected this ROM");
+          }
+          loadSave();
+          frameDuration = 1000 / Math.max(1, module._md_fps());
+          initAudio(module._md_sample_rate());
+          document.title = title + " — DarkRP Mega Drive";
+          status.firstChild.nodeValue = title;
+          detail.textContent = "Software Canvas2D renderer active";
+          running = true;
+          requestAnimationFrame(loop);
+        }).catch(fail);
+      }
+
+      resume.onclick = function () {
+        if (audioContext) audioContext.resume();
+        resume.style.display = "none";
+      };
+      window.onkeydown = function (event) {
+        keys[event.keyCode] = true;
+        if ((event.keyCode >= 37 && event.keyCode <= 40) || event.keyCode === 13
+              || event.keyCode === 65 || event.keyCode === 67 || event.keyCode === 68
+              || event.keyCode === 83 || event.keyCode === 88 || event.keyCode === 90) {
+          event.preventDefault();
+        }
+      };
+      window.onkeyup = function (event) { keys[event.keyCode] = false; };
+      window.onbeforeunload = function () { saveGame(); if (module) module._md_unload(); };
+
+      if (!context) {
+        fail(new Error("Canvas2D is unavailable"));
+      } else if (!/^https?:\/\//i.test(romURL)) {
+        fail(new Error("Invalid ROM URL"));
+      } else if (typeof DRPMegaDriveCore !== "function") {
+        fail(new Error("Mega Drive runtime did not load: " + (window.DRPMegaDriveRuntimeError || "unknown script failure")));
+      } else {
+        detail.textContent = "Downloading " + title + "…";
+        loadBinary(romURL, start, fail);
+      }
+    }());
+  </script>
+</body>
+</html>
