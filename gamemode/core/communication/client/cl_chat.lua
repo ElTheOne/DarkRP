@@ -69,6 +69,8 @@ local Chat = {
 	interactingUntil = 0
 }
 DRP.Chat = Chat
+local recentCache = { dirty = true, nextRefresh = 0, width = 0, rows = {}, totalHeight = 0 }
+local recentBackground = Color(12, 16, 24, 210)
 
 surface.CreateFont("DRP.Chat.Title", { font = "Roboto", size = 18, weight = 800 })
 surface.CreateFont("DRP.Chat.Button", { font = "Roboto", size = 14, weight = 700 })
@@ -80,6 +82,12 @@ local function categoryVisible(category)
 	if Chat.hidden[category] then return false end
 	return Chat.solo == nil or Chat.solo == category
 end
+
+local function invalidateRecentCache()
+	recentCache.dirty = true
+end
+
+hook.Add("DRPClientScreenSizeChanged", "DRP.Chat.RecentCache", invalidateRecentCache)
 
 local function scrollToBottom()
 	if not IsValid(Chat.scroll) then return end
@@ -213,6 +221,7 @@ local function setSolo(category)
 		Chat.hidden[category] = false
 	end
 	markVisibleRead()
+	invalidateRecentCache()
 	rebuildMessages()
 	refocusEntry()
 end
@@ -220,6 +229,7 @@ end
 local function toggleFilter(category)
 	Chat.hidden[category] = not Chat.hidden[category]
 	if not Chat.hidden[category] then clearUnread(category) end
+	invalidateRecentCache()
 	rebuildMessages()
 	refocusEntry()
 end
@@ -398,6 +408,7 @@ function Chat.Add(category, sender, name, text, nameColor)
 	}
 	Chat.messages[#Chat.messages + 1] = message
 	if #Chat.messages > MAX_MESSAGES then table.remove(Chat.messages, 1) end
+	invalidateRecentCache()
 
 	if not categoryVisible(category) then
 		Chat.unread[category] = math.min((Chat.unread[category] or 0) + 1, 999)
@@ -446,38 +457,46 @@ hook.Add("HUDShouldDraw", "DRP.Chat.HideStock", function(name)
 	if name == "CHudChat" then return false end
 end)
 
-hook.Add("HUDPaint", "DRP.Chat.Recent", function()
-	if DRP.UI and DRP.UI.ToolgunFocus and DRP.UI.ToolgunFocus() then return end
-	if Chat.open or not recentMessages:GetBool() then return end
+local function rebuildRecentCache(width)
 	local shown = {}
+	local now = CurTime()
 	for index = #Chat.messages, 1, -1 do
 		local message = Chat.messages[index]
-		if CurTime() - message.received <= 9 and categoryVisible(message.category) then
+		if now - message.received <= 9 and categoryVisible(message.category) then
 			table.insert(shown, 1, message)
 			if #shown >= 5 then break end
 		end
 	end
-
-	local x, width = 28, math.min(620, ScrW() - 56)
-	local rows = {}
-	local totalHeight = 0
+	local rows, totalHeight = {}, 0
 	for _, message in ipairs(shown) do
 		surface.SetFont("DRP.Chat.Name")
-		local textX = x + 79 + surface.GetTextSize(message.name .. ":")
-		local bodyWidth = math.max(width - (textX - x) - 12, 24)
+		local textX = 107 + surface.GetTextSize(message.name .. ":")
+		local bodyWidth = math.max(width - (textX - 28) - 12, 24)
 		local lines = wrapText(message.text, "DRP.Chat.Body", bodyWidth)
 		if #lines == 0 then lines[1] = message.text end
 		local height = math.max(29, 12 + (#lines * 16))
 		rows[#rows + 1] = { message = message, lines = lines, textX = textX, height = height }
 		totalHeight = totalHeight + height + 8
 	end
-	local y = ScrH() - PLAYER_CARD_CLEARANCE - totalHeight
-	for _, row in ipairs(rows) do
+	recentCache.dirty = false
+	recentCache.nextRefresh = now + 0.25
+	recentCache.width = width
+	recentCache.rows = rows
+	recentCache.totalHeight = totalHeight
+end
+
+hook.Add("HUDPaint", "DRP.Chat.Recent", function()
+	if DRP.UI and DRP.UI.ToolgunFocus and DRP.UI.ToolgunFocus() then return end
+	if Chat.open or not recentMessages:GetBool() then return end
+	local x, width = 28, math.min(620, ScrW() - 56)
+	if recentCache.dirty or recentCache.width ~= width or CurTime() >= recentCache.nextRefresh then
+		rebuildRecentCache(width)
+	end
+	local y = ScrH() - PLAYER_CARD_CLEARANCE - recentCache.totalHeight
+	for _, row in ipairs(recentCache.rows) do
 		local message, lines, textX, height = row.message, row.lines, row.textX, row.height
 		local category = categories[message.category]
-		surface.SetFont("DRP.Chat.Name")
-		local nameWidth = surface.GetTextSize(message.name .. ":")
-		draw.RoundedBox(5, x, y, width, height, Color(12, 16, 24, 210))
+		draw.RoundedBox(5, x, y, width, height, recentBackground)
 		draw.RoundedBoxEx(5, x, y, 3, height, category.color, true, false, true, false)
 		draw.SimpleText(category.name, "DRP.Chat.Small", x + 11, math.Clamp(y + (height * 0.5), y + 8, y + 21), category.color, TEXT_ALIGN_LEFT, TEXT_ALIGN_CENTER)
 		draw.SimpleText(message.name .. ":", "DRP.Chat.Name", x + 72, y + 15, message.nameColor, TEXT_ALIGN_LEFT, TEXT_ALIGN_CENTER)

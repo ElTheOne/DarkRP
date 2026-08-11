@@ -2,11 +2,14 @@
 -- Tool Gun. These stools belong to this gamemode, so register their actual
 -- source files explicitly into Sandbox's canonical gmod_tool table.
 DRP.Toolgun = DRP.Toolgun or {}
-DRP.Toolgun.Build = "20260807.3-root-source-registration"
+DRP.Toolgun.Build = "20260810.4-synchronous-source-capture"
 
 local bundledModes = {
 	drp_property_zone = {
 		path = "core/toolgun/stools/drp_property_zone.lua"
+	},
+	drp_police_route = {
+		path = "core/toolgun/stools/drp_police_route.lua"
 	},
 	precision = {
 		path = "core/toolgun/stools/precision.lua",
@@ -19,6 +22,7 @@ local bundledModes = {
 }
 
 local pendingSource
+local deferredSources = {}
 
 local function storedDefinition()
 	return weapons.GetStored("gmod_tool")
@@ -51,10 +55,14 @@ function DRP.Toolgun.BeginBundledSource(mode)
 	assert(pendingSource == nil, "another bundled Tool source is already loading")
 	mode = string.lower(tostring(mode or ""))
 	local details = assert(bundledModes[mode], "unknown bundled Tool mode: " .. mode)
-	local definition = assert(storedDefinition(), "Sandbox gmod_tool is not registered")
-	local tools = assert(storedTools(), "Sandbox gmod_tool table is unavailable")
-	local prototype = assert(toolPrototype(tools), "Sandbox Tool prototype is unavailable")
-	local instance = prototype:Create()
+	local definition = storedDefinition()
+	local tools = storedTools()
+	local prototype = toolPrototype(tools)
+	-- A clean client evaluates gamemode/shared.lua before scripted weapons have
+	-- registered. Capture the stool into a plain definition table in that phase;
+	-- RegisterBundledTools promotes it into Sandbox's real Tool prototype later.
+	local deferred = not definition or not tools or not prototype
+	local instance = deferred and {} or prototype:Create()
 	instance.Mode = mode
 	instance.SWEP = definition
 	pendingSource = {
@@ -63,10 +71,33 @@ function DRP.Toolgun.BeginBundledSource(mode)
 		definition = definition,
 		tools = tools,
 		instance = instance,
+		deferred = deferred,
 		previous = TOOL
 	}
 	TOOL = instance
 	return instance
+end
+
+-- A failed source include must never leave the global TOOL context poisoned.
+-- The root loader uses this when a third-party stool raises during hot reload.
+function DRP.Toolgun.AbortBundledSource(mode)
+	local pending = pendingSource
+	if not pending then return false end
+	if mode and pending.mode ~= string.lower(tostring(mode)) then return false end
+	pendingSource = nil
+	TOOL = pending.previous
+	return true
+end
+
+function DRP.Toolgun.CanLoadBundledSources()
+	return storedDefinition() ~= nil
+		and storedTools() ~= nil
+		and toolPrototype(storedTools()) ~= nil
+end
+
+function DRP.Toolgun.HasBundledSource(mode)
+	mode = string.lower(tostring(mode or ""))
+	return deferredSources[mode] ~= nil or DRP.Toolgun.IsModeReady(mode)
 end
 
 function DRP.Toolgun.FinishBundledSource(mode)
@@ -78,11 +109,43 @@ function DRP.Toolgun.FinishBundledSource(mode)
 	assert(not details.version or instance.DRPBundledVersion == details.version,
 		"wrong bundled source version for " .. pending.mode)
 	assert(isfunction(instance.LeftClick), "bundled source has no LeftClick for " .. pending.mode)
+	if pending.deferred then
+		deferredSources[pending.mode] = {
+			definition = instance,
+			details = details
+		}
+		return true
+	end
 	instance:CreateConVars()
 	assert(hook.Run("PreRegisterTOOL", instance, pending.mode) ~= false,
 		"registration rejected by PreRegisterTOOL: " .. pending.mode)
 	pending.tools[pending.mode] = instance
 	return true
+end
+
+local function promoteDeferredSources()
+	local definition = storedDefinition()
+	local tools = storedTools()
+	local prototype = toolPrototype(tools)
+	if not definition or not tools or not prototype then return false end
+
+	for mode, queued in pairs(deferredSources) do
+		if modeReady(tools[mode], queued.details) then
+			deferredSources[mode] = nil
+		else
+			local instance = prototype:Create()
+			for key, value in pairs(queued.definition) do instance[key] = value end
+			instance.Mode = mode
+			instance.SWEP = definition
+			instance:CreateConVars()
+			if hook.Run("PreRegisterTOOL", instance, mode) ~= false then
+				tools[mode] = instance
+				deferredSources[mode] = nil
+			end
+		end
+	end
+
+	return next(deferredSources) == nil
 end
 
 function DRP.Toolgun.IsModeReady(mode)
@@ -128,6 +191,7 @@ function DRP.Toolgun.SyncLiveWeapons()
 end
 
 function DRP.Toolgun.RegisterBundledTools()
+	promoteDeferredSources()
 	DRP.Toolgun.SyncLiveWeapons()
 	return DRP.Toolgun.IsReady()
 end
@@ -168,10 +232,12 @@ else
 		local active = IsValid(LocalPlayer()) and LocalPlayer():GetActiveWeapon() or nil
 		local live = IsValid(active) and active:GetClass() == "gmod_tool" and active.Tool or nil
 		print(string.format(
-			"[DRP TOOLGUN CLIENT] build=%s registered=%s tools=%d precision=%s/%s stacker=%s/%s active=%s mode=%s",
+			"[DRP TOOLGUN CLIENT] build=%s registered=%s tools=%d route=%s/%s precision=%s/%s stacker=%s/%s active=%s mode=%s",
 			tostring(DRP.Toolgun.Build),
 			tostring(istable(tools)),
 			istable(tools) and table.Count(tools) or 0,
+			tostring(istable(tools) and modeReady(tools.drp_police_route, bundledModes.drp_police_route)),
+			tostring(istable(live) and modeReady(live.drp_police_route, bundledModes.drp_police_route)),
 			tostring(istable(tools) and modeReady(tools.precision, bundledModes.precision)),
 			tostring(istable(live) and modeReady(live.precision, bundledModes.precision)),
 			tostring(istable(tools) and modeReady(tools.stacker_improved, bundledModes.stacker_improved)),

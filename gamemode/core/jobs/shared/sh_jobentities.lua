@@ -11,11 +11,14 @@ DRP.JobEntities = {
 	{ key = "tip_jar", name = "Tip Jar", class = "drp_tip_jar", model = "models/props_lab/jar01b.mdl", job = "hobo", price = 0, countLimit = 1, category = "Hobo" },
 	{ key = "evidence_locker", name = "Evidence Locker", class = "drp_evidence_locker", model = "models/props_c17/Lockers001a.mdl", police = true, ownerOnly = true, price = 0, countLimit = 1, category = "Police Infrastructure" },
 	{ key = "jailer", name = "Jailer", class = "drp_jailer", model = "models/Humans/Group03m/male_09.mdl", police = true, ownerOnly = true, price = 0, countLimit = 1, category = "Police Infrastructure" },
+	{ key = "councilman", name = "Councilman", class = "drp_councilman", model = "models/Humans/Group01/male_08.mdl", ownerOnly = true, price = 0, countLimit = 1, category = "Government Infrastructure" },
 	{ key = "police_armory", name = "Police Armory", class = "drp_police_armory", model = "models/props_c17/Lockers001a.mdl", police = true, ownerOnly = true, price = 0, countLimit = 1, category = "Police Infrastructure" },
 	{ key = "treasury_vault", name = "Treasury Vault", class = "drp_treasury_vault", model = "models/props_c17/Lockers001a.mdl", ownerOnly = true, price = 0, countLimit = 1, category = "Government Infrastructure" },
+	{ key = "municipal_atm", name = "Municipal Bond ATM", class = "drp_atm", model = "models/props_c17/consolebox01a.mdl", ownerOnly = true, price = 0, countLimit = 8, category = "Government Infrastructure" },
 	{ key = "salvage_dumpster", name = "Salvage Dumpster", class = "drp_salvage_dumpster", model = "models/props_junk/TrashDumpster01a.mdl", ownerOnly = true, price = 0, countLimit = 16, category = "Server Infrastructure" },
 	{ key = "salvage_trashcan", name = "Salvage Trashcan", class = "drp_salvage_trashcan", model = "models/props_junk/TrashBin01a.mdl", ownerOnly = true, price = 0, countLimit = 32, category = "Server Infrastructure" },
 	{ key = "crafting_table", name = "Gunsmithing Workbench", class = "drp_crafting_table", model = "models/props_c17/FurnitureTable001a.mdl", price = 1500, countLimit = 3, limitedKind = "production", crafting = true, category = "Production" },
+	{ key = "base_bed", name = "Base Bed", class = "drp_spawn_bed", model = "models/props_c17/FurnitureBed001a.mdl", price = 500, countLimit = 16, bed = true, public = true, category = "Property" },
 	{ key = "drug_heroin", name = "Heroin", class = "drp_drug", model = "models/props_junk/garbage_bag001a.mdl", job = "drug_dealer", price = 450, drug = "heroin", category = "Drug Dealer" },
 	{ key = "drug_speed", name = "Speed", class = "drp_drug", model = "models/props_lab/jar01a.mdl", job = "drug_dealer", price = 300, drug = "speed", category = "Drug Dealer" },
 	{ key = "drug_weed", name = "Weed", class = "drp_drug", model = "models/props_lab/box01a.mdl", job = "drug_dealer", price = 100, drug = "weed", category = "Drug Dealer" },
@@ -244,9 +247,11 @@ registerEntity("drp_tip_jar", "models/props_lab/jar01b.mdl", "Tip Jar")
 registerEntity("drp_evidence_locker", "models/props_c17/Lockers001a.mdl", "Evidence Locker")
 registerEntity("drp_police_armory", "models/props_c17/Lockers001a.mdl", "Police Armory")
 registerEntity("drp_treasury_vault", "models/props_c17/Lockers001a.mdl", "Treasury Vault")
+registerEntity("drp_atm", "models/props_c17/consolebox01a.mdl", "Municipal Bond ATM")
 registerEntity("drp_salvage_dumpster", "models/props_junk/TrashDumpster01a.mdl", "Salvage Dumpster")
 registerEntity("drp_salvage_trashcan", "models/props_junk/TrashBin01a.mdl", "Salvage Trashcan")
 registerEntity("drp_crafting_table", "models/props_c17/FurnitureTable001a.mdl", "Gunsmithing Workbench")
+registerEntity("drp_spawn_bed", "models/props_c17/FurnitureBed001a.mdl", "Base Bed")
 registerEntity("drp_crafting_item", "models/props_lab/box01a.mdl", "Crafting Item")
 registerEntity("drp_drug", "models/props_lab/jar01b.mdl", "Drug Package")
 
@@ -290,6 +295,25 @@ function jailer:Use(activator)
 end
 if CLIENT then function jailer:Draw() self:DrawModel() end end
 scripted_ents.Register(jailer, "drp_jailer")
+
+local councilman = {
+	Type = "anim", Base = "base_anim", PrintName = "Councilman", Spawnable = false,
+	AutomaticFrameAdvance = true, Model = "models/Humans/Group01/male_08.mdl"
+}
+function councilman:Initialize()
+	if not SERVER then return end
+	self:SetModel(self.Model) self:PhysicsInit(SOLID_VPHYSICS) self:SetMoveType(MOVETYPE_VPHYSICS)
+	self:SetSolid(SOLID_VPHYSICS) self:SetUseType(SIMPLE_USE)
+	local sequence = self:LookupSequence("idle_all_01")
+	if sequence and sequence >= 0 then self:SetSequence(sequence) end
+	local physics = self:GetPhysicsObject()
+	if IsValid(physics) then physics:EnableMotion(false) physics:EnableGravity(false) physics:Sleep() end
+end
+function councilman:Use(activator)
+	if SERVER and DRP.JobEntityService then DRP.JobEntityService.Use(self, activator) end
+end
+if CLIENT then function councilman:Draw() self:DrawModel() end end
+scripted_ents.Register(councilman, "drp_councilman")
 
 local keyModelCandidates = {
 	view = {

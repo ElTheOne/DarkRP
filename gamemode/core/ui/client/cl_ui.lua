@@ -22,20 +22,38 @@ surface.CreateFont("DRP.Admin.Small", { font = "Roboto", size = 14, weight = 500
 -- Tool Gun focus mode is shared by every custom HUD module. World-space tool
 -- previews remain available, while normal screen overlays can cheaply opt out.
 function UI.ToolgunFocus()
+	local frame = FrameNumber()
+	if UI.ToolgunFocusFrame == frame then return UI.ToolgunFocusValue == true end
 	local ply = LocalPlayer()
-	if not IsValid(ply) then return false end
-	local weapon = ply:GetActiveWeapon()
-	return IsValid(weapon) and weapon:GetClass() == "gmod_tool"
+	local focused = false
+	if IsValid(ply) then
+		local weapon = ply:GetActiveWeapon()
+		focused = IsValid(weapon) and weapon:GetClass() == "gmod_tool"
+	end
+	UI.ToolgunFocusFrame = frame
+	UI.ToolgunFocusValue = focused
+	return focused
 end
 
 UI.CursorMode = UI.CursorMode == true
 UI.CursorKeyState = UI.CursorKeyState or {}
+
+local function enforceCursorMode()
+	if UI.CursorMode and not vgui.CursorVisible() and not gui.IsGameUIVisible() then
+		gui.EnableScreenClicker(true)
+	end
+end
 
 function UI.SetCursorMode(enabled)
 	enabled = enabled == true
 	if UI.CursorMode == enabled then return end
 	UI.CursorMode = enabled
 	gui.EnableScreenClicker(enabled)
+	if enabled then
+		hook.Add("Think", "DRP.UI.CursorMode", enforceCursorMode)
+	else
+		hook.Remove("Think", "DRP.UI.CursorMode")
+	end
 	hook.Run("DRPCursorModeChanged", enabled)
 end
 
@@ -69,23 +87,23 @@ hook.Add("PlayerBindPress", "DRP.UI.CursorMode", function(_, bind, pressed)
 	if input.IsKeyDown(KEY_Z) and (string.find(bind, "gmod_undo", 1, true) or string.find(bind, "undo", 1, true)) then return true end
 end)
 
--- Other panels may disable the screen clicker when they close. Cursor mode is
--- an explicit gameplay state, so restore it if another UI relinquishes it.
-hook.Add("Think", "DRP.UI.CursorMode", function()
-	if UI.CursorMode and not vgui.CursorVisible() and not gui.IsGameUIVisible() then
-		gui.EnableScreenClicker(true)
-	end
-end)
+-- Other panels may disable the screen clicker when they close. Install this
+-- guard only while cursor mode is active instead of paying for an idle Think
+-- hook during ordinary gameplay.
+hook.Remove("Think", "DRP.UI.CursorMode")
+if UI.CursorMode then hook.Add("Think", "DRP.UI.CursorMode", enforceCursorMode) end
+
+local cursorModeText = "CURSOR MODE  •  F3 / Z TO RETURN"
+surface.SetFont("DRP.Admin.Small")
+local cursorModeWidth, cursorModeHeight = surface.GetTextSize(cursorModeText)
+local cursorModeBackground = Color(8, 13, 25, 232)
 
 hook.Add("HUDPaint", "DRP.UI.CursorMode", function()
 	if not UI.CursorMode then return end
-	local text = "CURSOR MODE  •  F3 / Z TO RETURN"
-	surface.SetFont("DRP.Admin.Small")
-	local width, height = surface.GetTextSize(text)
-	local x, y = ScrW() * 0.5 - width * 0.5 - 14, 24
-	draw.RoundedBox(7, x, y, width + 28, height + 14, Color(8, 13, 25, 232))
-	draw.RoundedBoxEx(7, x, y, 4, height + 14, UI.Colors.accent, true, false, true, false)
-	draw.SimpleText(text, "DRP.Admin.Small", ScrW() * 0.5, y + (height + 14) * 0.5,
+	local x, y = ScrW() * 0.5 - cursorModeWidth * 0.5 - 14, 24
+	draw.RoundedBox(7, x, y, cursorModeWidth + 28, cursorModeHeight + 14, cursorModeBackground)
+	draw.RoundedBoxEx(7, x, y, 4, cursorModeHeight + 14, UI.Colors.accent, true, false, true, false)
+	draw.SimpleText(cursorModeText, "DRP.Admin.Small", ScrW() * 0.5, y + (cursorModeHeight + 14) * 0.5,
 		color_white, TEXT_ALIGN_CENTER, TEXT_ALIGN_CENTER)
 end)
 
@@ -126,6 +144,10 @@ function UI.Frame(title, width, height)
 	close:SetSize(38, 32)
 	close:SetPos(frame:GetWide() - 50, 13)
 	close:SetFont("DRP.Admin.Title")
+	-- Complex full-screen surfaces resize the shared frame after creation. Keep
+	-- the close control addressable so those callers can anchor it to the final
+	-- bounds instead of leaving it at the helper's initial clamped width.
+	frame.DRPCloseButton = close
 	return frame
 end
 

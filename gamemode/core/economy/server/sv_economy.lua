@@ -1,7 +1,11 @@
 local Economy = {
 	DefaultMoney = 500,
 	SalaryInterval = 120,
-	OutboxDirectory = "darkrp/profile_outbox"
+	OutboxDirectory = "darkrp/profile_outbox",
+	-- Runtime mutations may arrive several times in one server frame (salary,
+	-- civic, XP and derived-role updates frequently travel together). Keep the
+	-- crash-recovery journal event driven, but serialize it only once per frame.
+	PendingOutboxWrites = setmetatable({}, { __mode = "k" })
 }
 
 DRP.Economy = Economy
@@ -17,9 +21,13 @@ local function outboxPath(steamID64)
 end
 
 local function playerSnapshot(ply, totalPlaytime)
+	-- A Steam nickname is only a temporary display fallback. Persist an RP name
+	-- after the Councilman has issued a civic identity, otherwise a new player
+	-- could disconnect once and accidentally bypass registration on the next join.
+	local rpName = DRP.Identity and DRP.Identity:IsRegistered(ply) and ply:DRPName() or ""
 	return {
 		revision = math.max(os.time() * 1000, math.floor(tonumber(ply.DRPProfileOutboxRevision) or 0) + 1),
-		last_name = ply:Nick(), rp_name = ply:DRPName(), job_name = ply.DRPJobNameValue or "",
+		last_name = ply:Nick(), rp_name = rpName, job_name = ply.DRPJobNameValue or "",
 		money = ply:DRPMoney(), job_key = ply:DRPJob().key,
 		total_playtime_seconds = math.max(0, math.floor(tonumber(totalPlaytime) or 0)),
 		xp_points = ply:DRPXP(), xp_level = ply:DRPXPLevel(), xp_prestige = ply:DRPXPPrestige(),
@@ -34,13 +42,17 @@ end
 
 function Economy.WriteOutbox(ply, totalPlaytime)
 	if not IsValid(ply) or ply:IsBot() or not ply.DRPSessionStartedAt then return nil end
+	local started = DRP.Profile and DRP.Profile.Begin and DRP.Profile.Begin() or nil
 	local elapsed = math.max(0, CurTime() - ply.DRPSessionStartedAt)
 	local snapshot = playerSnapshot(ply, totalPlaytime or ((ply.DRPTotalPlaytimeBase or 0) + elapsed))
 	local payload = util.TableToJSON(snapshot, false)
-	if not payload then return nil end
-	file.CreateDir("darkrp") file.CreateDir(Economy.OutboxDirectory)
+	if not payload then
+		if DRP.Profile and DRP.Profile.Finish then DRP.Profile.Finish("economy.outbox", started) end
+		return nil
+	end
 	file.Write(outboxPath(ply:SteamID64()), payload)
 	ply.DRPProfileOutboxRevision = snapshot.revision
+	if DRP.Profile and DRP.Profile.Finish then DRP.Profile.Finish("economy.outbox", started) end
 	return snapshot
 end
 
@@ -68,6 +80,7 @@ function Economy.SavePlayer(ply, callback)
 	ply.DRPTotalPlaytimeBase = totalPlaytime
 	ply.DRPSessionStartedAt = CurTime()
 	ply.DRPPlayerRecordDirty = true
+	Economy.PendingOutboxWrites[ply] = nil
 	local snapshot = Economy.WriteOutbox(ply, totalPlaytime)
 	if not snapshot then
 		if callback then callback(false, "profile snapshot could not be serialized") end
@@ -95,12 +108,24 @@ function Economy.SavePlayer(ply, callback)
 	return true
 end
 
+function Economy.FlushQueuedOutbox(ply)
+	if not Economy.PendingOutboxWrites[ply] then return false end
+	Economy.PendingOutboxWrites[ply] = nil
+	if not IsValid(ply) or ply:IsBot() or not ply.DRPPlayerRecordDirty then return false end
+	return Economy.WriteOutbox(ply) ~= nil
+end
+
 function Economy.QueueSave(ply)
-	if not IsValid(ply) or ply:IsBot() then return end
-	-- Runtime mutations are journaled locally immediately, but MySQL remains
-	-- lifecycle/event driven and is only written on disconnect/clean shutdown.
+	if not IsValid(ply) or ply:IsBot() then return false end
+	-- MySQL remains lifecycle/event driven. Coalescing only affects the local
+	-- recovery journal; SavePlayer still performs an immediate lifecycle write.
 	ply.DRPPlayerRecordDirty = true
-	Economy.WriteOutbox(ply)
+	if Economy.PendingOutboxWrites[ply] then return true end
+	Economy.PendingOutboxWrites[ply] = true
+	timer.Simple(0, function()
+		if DRP.Economy == Economy then Economy.FlushQueuedOutbox(ply) end
+	end)
+	return true
 end
 
 function Economy.SaveAll()
@@ -109,7 +134,10 @@ function Economy.SaveAll()
 	end
 end
 
-function Economy:Start() end
+function Economy:Start()
+	file.CreateDir("darkrp")
+	file.CreateDir(self.OutboxDirectory)
+end
 function Economy:Stop() end
 
 function Economy.InitializePlayer(ply, amount)
@@ -145,8 +173,41 @@ function Economy.Add(ply, amount, reason, context)
 	return true
 end
 
--- Server-generated income only. Transfers, refunds, escrow and administrative
--- adjustments must continue to use Add so existing value is never duplicated.
+-- Releases existing money to a recipient after applying the director's
+-- automatic circulation burn. The gross amount has already left a payer or
+-- escrow; only the net amount enters the recipient wallet.
+function Economy.SettleTransfer(ply, amount, reason)
+	amount = cleanAmount(amount)
+	if amount <= 0 or not IsValid(ply) then return false, 0, 0 end
+	local burned, net = 0, amount
+	if DRP.EconomyDirector and DRP.EconomyDirector.CalculateTransactionBurn then
+		burned, net = DRP.EconomyDirector:CalculateTransactionBurn(amount)
+	end
+	if net > 0 then
+		Economy.Add(ply, net, nil, { kind = "transfer", source = reason or "transaction settlement" })
+	end
+	if burned > 0 then
+		DRP.EconomyDirector:RecordBurn(burned, reason or "transaction settlement")
+		if DRP.Audit then DRP.Audit.Log(ply, "economy_transaction_burn", nil, tostring(reason or "transaction") .. " gross=" .. amount .. " net=" .. net .. " burned=" .. burned) end
+	end
+	return true, net, burned
+end
+
+function Economy.Transfer(from, to, amount, reason)
+	amount = cleanAmount(amount)
+	if amount <= 0 or not IsValid(from) or not IsValid(to) or from == to or from:DRPMoney() < amount then return false, 0, 0 end
+	Economy.Set(from, from:DRPMoney() - amount, false, { kind = "transfer", source = reason or "player transfer" })
+	local ok, net, burned = Economy.SettleTransfer(to, amount, reason or "player transfer")
+	if not ok then
+		Economy.Add(from, amount, nil, { kind = "transfer", source = "failed transfer rollback" })
+		return false, 0, 0
+	end
+	return true, net, burned
+end
+
+-- Server-generated income only. Successful ownership-changing payments use
+-- Transfer/SettleTransfer; refunds, escrow releases and administrative
+-- adjustments use Add so existing value is never duplicated or taxed twice.
 function Economy.Reward(ply, amount, reason)
 	local ordinary = cleanAmount(amount)
 	if ordinary <= 0 or not IsValid(ply) then return false, 0 end
@@ -157,10 +218,10 @@ function Economy.Reward(ply, amount, reason)
 	return Economy.Add(ply, rewarded, tostring(reason or "server reward") .. suffix, { kind = "mint", source = reason or "server reward" }), rewarded
 end
 
-function Economy.Take(ply, amount, reason)
+function Economy.Take(ply, amount, reason, context)
 	amount = cleanAmount(amount)
 	if amount <= 0 or not IsValid(ply) or ply:DRPMoney() < amount then return false end
-	Economy.Set(ply, ply:DRPMoney() - amount, false, { kind = "burn", source = reason or "economy.take" })
+	Economy.Set(ply, ply:DRPMoney() - amount, false, context or { kind = "burn", source = reason or "economy.take" })
 	if reason then DRP.Net.Notify(ply, "-$" .. amount .. " — " .. reason, 2) end
 	return true
 end
@@ -175,7 +236,7 @@ function Economy.ScheduleSalary(ply)
 		local payment, tax, bonus = job.salary, 0, 0
 		if DRP.Government then payment, tax, bonus = DRP.Government.ProcessSalary(ply, job) end
 		-- ProcessSalary already applies the supporter multiplier before tax.
-		Economy.Add(ply, payment, job.name .. " salary" .. (bonus > 0 and (" (+$" .. bonus .. " funded)") or ""))
+		Economy.Add(ply, payment, job.name .. " salary" .. (bonus > 0 and (" (+$" .. bonus .. " funded)") or ""), { kind = "mint", source = "salary" })
 		if tax > 0 then DRP.Net.Notify(ply, "$" .. tax .. " salary tax was paid to the treasury.", 0) end
 		Economy.ScheduleSalary(ply)
 	end)
@@ -183,5 +244,6 @@ end
 
 function Economy.RemovePlayer(ply)
 	DRP.Deadlines.Cancel("salary:" .. ply:SteamID64())
+	Economy.PendingOutboxWrites[ply] = nil
 	ply.DRPPlayerRecordDirty = nil
 end

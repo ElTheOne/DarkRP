@@ -55,7 +55,8 @@ local PVP = {
 		weapon_drp_medkit = true,
 		weapon_drp_defibrillator = true,
 		ephone = true,
-		weapon_drp_mayor_tablet = true
+		weapon_drp_mayor_tablet = true,
+		weapon_drp_police_tablet = true
 	}
 }
 
@@ -374,6 +375,13 @@ function PVP.CanDamage(attacker, victim)
 	if DRP.PVPConsent then
 		local allowed, incident = DRP.PVPConsent.Allows(attacker, victim)
 		if allowed then return true, incident end
+	end
+	-- Property defence permissions are revalidated at the damage boundary as
+	-- well as during the one-second activity check. A player who has just
+	-- crossed out of the zone can therefore never be hit under a stale grant.
+	local trespass = DRP.Incidents.FindPair(attacker, victim, "property_trespass")
+	if trespass and DRP.Properties and DRP.Properties.RefreshTrespassIncident then
+		DRP.Properties:RefreshTrespassIncident(trespass)
 	end
 	-- Normal incident grants take precedence so mutual PvP retains its incident,
 	-- evidence and resolution. The Mob Boss permission is only the directional

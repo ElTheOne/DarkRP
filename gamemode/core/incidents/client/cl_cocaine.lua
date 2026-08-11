@@ -1,6 +1,18 @@
 local frame
 local trackedHotplate
 local nextHotplateScan = 0
+local hotplates = setmetatable({}, { __mode = "k" })
+
+local function indexHotplate(entity)
+	if IsValid(entity) and entity:GetClass() == "drp_cocaine_hotplate" then hotplates[entity] = true end
+end
+
+for _, entity in ipairs(ents.FindByClass("drp_cocaine_hotplate")) do indexHotplate(entity) end
+hook.Add("OnEntityCreated", "DRP.Cocaine.IndexHotplate", indexHotplate)
+hook.Add("EntityRemoved", "DRP.Cocaine.UnindexHotplate", function(entity)
+	hotplates[entity] = nil
+	if trackedHotplate == entity then trackedHotplate = nil end
+end)
 
 local function sendAction(entity, action)
 	net.Start("drp_cocaine_action_v1")
@@ -60,11 +72,11 @@ hook.Add("Think", "DRP.Cocaine.TrackHotplate", function()
 	local ply = LocalPlayer()
 	if not IsValid(ply) then return end
 	local bestDistance = 90000
-	for _, hotplate in ipairs(ents.FindByClass("drp_cocaine_hotplate")) do
-		if hotplate:GetNW2Float("DRPCocaineCookEnd", 0) > CurTime() then
+	for hotplate in pairs(hotplates) do
+		if IsValid(hotplate) and hotplate:GetNW2Float("DRPCocaineCookEnd", 0) > CurTime() then
 			local distance = ply:GetPos():DistToSqr(hotplate:GetPos())
 			if distance < bestDistance then trackedHotplate, bestDistance = hotplate, distance end
-		end
+		elseif not IsValid(hotplate) then hotplates[hotplate] = nil end
 	end
 end)
 

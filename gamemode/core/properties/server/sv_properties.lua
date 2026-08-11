@@ -68,6 +68,18 @@ DRP.Incidents.RegisterType("property_raid", {
 	}
 })
 
+DRP.Incidents.RegisterType("property_trespass", {
+	initial = "trespassing",
+	progression = false,
+	outcomes = {
+		default = { winner = "victim", loser = "instigator" }
+	},
+	onParticipantUnavailable = function(incident, ply, resolution, detail)
+		return Properties.HandleTrespassParticipantUnavailable
+			and Properties:HandleTrespassParticipantUnavailable(incident, ply, resolution, detail)
+	end
+})
+
 local defaultRoles = {
 	coowner = { access = true, storage = true, build = true, crafting = true, manage_members = true, manage_roles = false, finances = false },
 	tenant = { access = true, storage = true, build = true, crafting = false, manage_members = false, manage_roles = false, finances = false },
@@ -654,6 +666,10 @@ function Properties:Purchase(ply, propertyID)
 		DRP.Net.Notify(ply, definition.name .. " is not available for purchase.", 3)
 		return false
 	end
+	if DRP.Mercenaries and DRP.Mercenaries.PropertyReservations[propertyID] then
+		DRP.Net.Notify(ply, definition.name .. " is temporarily reserved by an active mercenary contract.", 3)
+		return false
+	end
 	local ownedCount = 0
 	for _ in pairs(self.OwnedProperties[ply:SteamID64()] or {}) do ownedCount = ownedCount + 1 end
 	local propertyLimit = DRP.Supporter and DRP.Supporter.PropertyLimit(ply) or 1
@@ -755,6 +771,7 @@ function Properties:RemoveMember(propertyID, memberID, reason)
 	self:Save()
 	self:Flush()
 	self:SyncAll(propertyID)
+	if self.RefreshTrespassProperty then self:RefreshTrespassProperty(propertyID) end
 	return true
 end
 
@@ -812,7 +829,7 @@ function Properties:AcceptInvite(ply)
 	local definition, lease = self.Get(invite.property_id)
 	if not definition or not lease or self.ActiveRaids[invite.property_id] or not lease.roles[invite.role] then self.Invites[ply:SteamID64()] = nil return false end
 	if not ply:DRPPersistent() then DRP.Net.Notify(ply, "Persistent database state is required for deposits and rent.", 3) return false end
-	if invite.deposit > 0 and not DRP.Economy.Take(ply, invite.deposit, "refundable property deposit") then
+	if invite.deposit > 0 and not DRP.Economy.Take(ply, invite.deposit, "refundable property deposit", { kind = "custody", source = "property deposit" }) then
 		DRP.Net.Notify(ply, "You cannot afford the $" .. invite.deposit .. " deposit.", 3)
 		return false
 	end
@@ -826,6 +843,7 @@ function Properties:AcceptInvite(ply)
 	self:Save()
 	self:Flush()
 	self:SyncAll(definition.id)
+	if self.RefreshTrespassProperty then self:RefreshTrespassProperty(definition.id) end
 	if DRP.Audit then DRP.Audit.Log(onlinePlayer(lease.owner_id), "property_tenant_joined", ply, "#" .. definition.id .. " role=" .. invite.role) end
 	DRP.Net.Notify(ply, "Joined " .. definition.name .. " as " .. invite.role .. ".", 1)
 	return true
@@ -843,6 +861,7 @@ function Properties:BeginEviction(actor, target, propertyID, reason)
 	self:Save()
 	self:Flush()
 	self:SyncAll(propertyID)
+	if self.RefreshTrespassProperty then self:RefreshTrespassProperty(propertyID) end
 	local onlineTarget = onlinePlayer(targetID)
 	local targetName = IsValid(onlineTarget) and onlineTarget:Nick() or member.name or targetID
 	DRP.Net.Notify(actor, targetName .. " received " .. self.EvictionNotice .. " seconds' eviction notice.", 1)
@@ -860,6 +879,7 @@ function Properties:SetRolePermission(ply, propertyID, role, permission, enabled
 	self:Save()
 	self:Flush()
 	self:SyncAll(propertyID)
+	if self.RefreshTrespassProperty then self:RefreshTrespassProperty(propertyID) end
 	if DRP.Audit then DRP.Audit.Log(ply, "property_role_permission", nil, "#" .. propertyID .. " " .. role .. "." .. permission .. "=" .. tostring(enabled)) end
 	return true
 end
@@ -875,6 +895,7 @@ function Properties:SetMemberRole(ply, target, propertyID, role)
 	self:Save()
 	self:Flush()
 	self:SyncAll(propertyID)
+	if self.RefreshTrespassProperty then self:RefreshTrespassProperty(propertyID) end
 	DRP.Net.Notify(target, "Your property role is now " .. role .. ".", 0)
 	if DRP.Audit then DRP.Audit.Log(ply, "property_member_role", target, "#" .. propertyID .. " role=" .. role) end
 	return true
@@ -890,6 +911,7 @@ function Properties:SetMemberRoleByID(ply, targetID, propertyID, role)
 	self:Save()
 	self:Flush()
 	self:SyncAll(propertyID)
+	if self.RefreshTrespassProperty then self:RefreshTrespassProperty(propertyID) end
 	local target = onlinePlayer(targetID)
 	if IsValid(target) then DRP.Net.Notify(target, "Your property role is now " .. role .. ".", 0) end
 	if DRP.Audit then DRP.Audit.Log(ply, "property_member_role", target or targetID, "#" .. propertyID .. " role=" .. role) end
@@ -1056,12 +1078,20 @@ function Properties:BuildPermissionAt(ply, position)
 	return false, nil, "That position is outside your property's configured build zones."
 end
 
-function Properties:ValidateEntityPlacement(ply, entity, permission)
+function Properties:ValidateSpawnPoint(ply, position)
+	if not IsValid(ply) or not isvector(position) then return false, nil, "Invalid spawn position." end
+	if hasAdministrativeBuildOverride(ply) then return true, nil, "admin-mode owner override" end
+	if self:IsBuildLockedAt(position) then
+		return false, nil, "Building is locked inside a declared raid area."
+	end
+	return self:BuildPermissionAt(ply, position)
+end
+
+function Properties:ValidateEntityPlacement(ply, entity, permission, strictSpawn)
 	if not IsValid(ply) or not IsValid(entity) then return false, nil, "invalid entity" end
-	if DRP.Props and DRP.Props.IsPortableValuable and DRP.Props.IsPortableValuable(entity) then
+	if not strictSpawn and DRP.Props and DRP.Props.IsPortableValuable and DRP.Props.IsPortableValuable(entity) then
 		return true, nil, "portable valuable"
 	end
-	if hasAdministrativeBuildOverride(ply) then return true, entity.DRPPropertyID, "admin-mode owner override" end
 	permission = permission == "storage" and "storage" or "build"
 	local id = steamID(ply)
 	local candidates = {}
@@ -1080,8 +1110,24 @@ function Properties:ValidateEntityPlacement(ply, entity, permission)
 			end
 		end
 	end
+	-- Administrative placement may bypass ownership, but property-bound systems
+	-- still require the containing property ID. Resolve it before falling back to
+	-- an unrestricted override so beds, crafting tables and props share the same
+	-- geometry result.
+	if hasAdministrativeBuildOverride(ply) then
+		for propertyID, definition in pairs(self.Definitions) do
+			if entityInsideZoneUnion(entity, definition.build_zones, self.BuildZoneTolerance) then
+				return true, propertyID, "admin-mode owner override"
+			end
+		end
+		return true, entity.DRPPropertyID, "admin-mode owner override"
+	end
 	if next(candidates) == nil then return false, nil, "You need property or job-base build access before spawning props." end
 	return false, nil, "The complete prop must remain inside the combined authorised build zones."
+end
+
+function Properties:ValidateSpawnedEntityPlacement(ply, entity, permission)
+	return self:ValidateEntityPlacement(ply, entity, permission, true)
 end
 
 -- Movement tools validate an already assigned entity against its original
@@ -1166,6 +1212,9 @@ end
 
 assert(include("sv_raids.lua"),
 	"missing core/properties/server/sv_raids.lua; upload the complete modular properties folder")
+
+assert(include("sv_trespass.lua"),
+	"missing core/properties/server/sv_trespass.lua; upload the complete modular properties folder")
 
 function Properties:CreateDefinition(ply, name, door)
 	if not DRP.Admin or not DRP.Admin.Has(ply, "doors") or not DRP.Doors.IsDoor(door) then return false end
@@ -1294,6 +1343,7 @@ hook.Add("CanTool", "DRP.Properties.ProtectTools", function(ply, trace, tool)
 	local entity = trace and trace.Entity
 	if not IsValid(entity) or not entity.DRPPropertyID then return end
 	if Properties.ActiveRaids[entity.DRPPropertyID] and entity.DRPPropertyDefence and (tool == "remover" or tool == "duplicator") then return false end
+	if IsValid(ply) and ply.DRPAdminEntityManagement == true and DRP.Admin and DRP.Admin.Has(ply, "props") then return end
 	if not Properties.CanManageEntity(ply, entity, entity.DRPPropertyStorage and "storage" or "build") then return false end
 end)
 
@@ -1312,14 +1362,9 @@ end)
 
 hook.Add("PlayerSpawnProp", "DRP.Properties.BuildZoneAuthorization", function(ply)
 	if not IsValid(ply) then return false end
-	if hasAdministrativeBuildOverride(ply) then return end
 	local trace = ply:GetEyeTrace()
 	if not trace.Hit or trace.HitSky then return false end
-	if Properties:IsBuildLockedAt(trace.HitPos) then
-		DRP.Net.Notify(ply, "Building is locked inside a declared raid area.", 3)
-		return false
-	end
-	local allowed, _, reason = Properties:BuildPermissionAt(ply, trace.HitPos)
+	local allowed, _, reason = Properties:ValidateSpawnPoint(ply, trace.HitPos)
 	if not allowed then
 		DRP.Net.Notify(ply, reason or "Props can only be spawned inside an authorised property build zone.", 3)
 		return false
@@ -1387,8 +1432,15 @@ local requiredPropertiesAPI = {
 	"RemoveBuildZoneAt",
 	"ClearBuildZones",
 	"BuildPermissionAt",
+	"ValidateSpawnPoint",
 	"ValidateEntityPlacement",
-	"LocationAt"
+	"ValidateSpawnedEntityPlacement",
+	"LocationAt",
+	"BelongsToProperty",
+	"TrespassPropertyAt",
+	"UpdateTrespass",
+	"RefreshTrespassProperty",
+	"ClearTrespassProperty"
 }
 
 assert(Properties.GeometryModuleLoaded == true,
@@ -1397,6 +1449,8 @@ assert(Properties.PersistenceModuleLoaded == true,
 	"properties module incomplete: persistence submodule did not finish loading")
 assert(Properties.RaidModuleLoaded == true,
 	"properties module incomplete: raid submodule did not finish loading")
+assert(Properties.TrespassModuleLoaded == true,
+	"properties module incomplete: trespass submodule did not finish loading")
 for _, method in ipairs(requiredPropertiesAPI) do
 	assert(isfunction(Properties[method]),
 		"properties module incomplete: missing required method Properties." .. method)

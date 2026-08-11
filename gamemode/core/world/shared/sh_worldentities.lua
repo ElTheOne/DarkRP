@@ -15,7 +15,7 @@ DRP.AllowedToolModes = DRP.AllowedToolModes or {
 	advballsocket = true, precision = true, easy_precision = true,
 	stacker_improved = true, parent = true, multi_parent = true, advdupe2 = true,
 	mediaplayer_spatial = true, mediaplayer_mimic = true,
-	drp_property_zone = true
+	drp_property_zone = true, drp_police_route = true
 }
 DRP.AllowedToolModes.stacker = nil
 DRP.AllowedToolModes.stacker_improved = true
@@ -39,7 +39,7 @@ DRP.BuiltinToolModes = DRP.BuiltinToolModes or {
 	duplicator = "Tools", leafblower = "Tools", remover = "Tools",
 	precision = "Construction", stacker_improved = "Construction",
 	mediaplayer_spatial = "Media Player", mediaplayer_mimic = "Media Player",
-	drp_property_zone = "DarkRP Server"
+	drp_property_zone = "DarkRP Server", drp_police_route = "DarkRP Server"
 }
 DRP.BuiltinToolModes.stacker = nil
 DRP.BuiltinToolModes.stacker_improved = "Construction"

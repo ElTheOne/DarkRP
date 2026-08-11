@@ -12,7 +12,7 @@ local Objectives = {
 	GuideTesters = setmetatable({}, { __mode = "k" }),
 	GuideProgress = {},
 	GuidePath = "darkrp/beginner_guide_progress.json",
-	GuideSequence = { "welcome_identity", "beginner_property_purchase", "welcome_pockets", "beginner_mugging", "beginner_healing", "beginner_review" },
+	GuideSequence = { "beginner_property_purchase", "welcome_identity", "welcome_pockets", "beginner_mugging", "beginner_healing", "beginner_review" },
 	MaxOffers = 3,
 	MaxActive = 2,
 	DismissCooldown = 300,
@@ -50,7 +50,7 @@ local function isNewPlayer(ply)
 end
 
 local function needsRPName(ply)
-	return isNewPlayer(ply) and tostring(ply.DRPRPNameValue or "") == ""
+	return isNewPlayer(ply) and (not DRP.Identity or not DRP.Identity:IsRegistered(ply))
 end
 
 local function roleIs(ply, id)
@@ -59,15 +59,18 @@ end
 
 local templates = {
 	{
-		key = "welcome_identity", category = "Getting Started", title = "Choose your identity",
-		description = "Set an RP name with /rpname or /name.", event = "rp_name_changed",
-		goal = 1, xp = 30, money = 150, priority = 100,
-		eligible = needsRPName, once = true, beginner = true, automatic = true
+		key = "welcome_identity", category = "Getting Started", title = "Register your civic identity",
+		description = "Now that you own a property, report to the police station, find the Councilman and press E to choose your RP name and appearance.", event = "identity_registered",
+		goal = 1, xp = 30, money = 150, priority = 99,
+		eligible = function(ply)
+			return needsRPName(ply) and ownsProperty(ply) and not roleIs(ply, DRP.Job.HOBO)
+		end,
+		once = true, beginner = true, automatic = true
 	},
 	{
 		key = "beginner_property_purchase", category = "Beginner Guide", title = "Purchase your first property",
-		description = "Open F4 → Properties, choose an available property, then press F on its main door to purchase it.",
-		event = "property_purchased", goal = 1, xp = 45, money = 250, priority = 99,
+		description = "Open F4 → Properties, choose an available property, then press F on its main door to purchase it. This establishes you before civic registration.",
+		event = "property_purchased", goal = 1, xp = 45, money = 250, priority = 100,
 		eligible = function(ply) return isNewPlayer(ply) and not ownsProperty(ply) end,
 		once = true, beginner = true, automatic = true
 	},
@@ -203,6 +206,48 @@ local templates = {
 		description = "Participate in an incident until the server records its outcome.",
 		event = "incident_resolved", goal = 1, xp = 50, money = 150, minPlayers = 2, priority = 40,
 		eligible = function(ply) return ready(ply) end
+	},
+	{
+		key = "social_hit_contract", category = "Connected Play", title = "Anonymous contract",
+		description = "Accept a server-issued target and eliminate them within five minutes. They will know a hit exists, but your identity stays concealed until your first attack.",
+		event = "social_hit_completed", goal = 1, xp = 130, money = 650, minPlayers = 2, priority = 67,
+		eligible = function(ply) return DRP.SocialObjectives and DRP.SocialObjectives:CanOffer(ply, "hit") or false end,
+		onAccept = function(ply) return DRP.SocialObjectives:Begin(ply, "hit", "social_hit_contract") end
+	},
+	{
+		key = "social_bodyguard", category = "Connected Play", title = "Protect a resident",
+		description = "Meet an assigned resident and remain close enough to protect them for three active minutes. Their identity is disclosed when you accept.",
+		event = "social_bodyguard_completed", goal = 1, xp = 90, money = 400, minPlayers = 2, priority = 54,
+		eligible = function(ply) return DRP.SocialObjectives and DRP.SocialObjectives:CanOffer(ply, "bodyguard") or false end,
+		onAccept = function(ply) return DRP.SocialObjectives:Begin(ply, "bodyguard", "social_bodyguard") end
+	},
+	{
+		key = "social_courier", category = "Connected Play", title = "Deliver a secure dispatch",
+		description = "Find the assigned resident, look directly at them and press E at close range to hand over a server-issued dispatch.",
+		event = "social_courier_completed", goal = 1, xp = 65, money = 275, minPlayers = 2, priority = 52,
+		eligible = function(ply) return DRP.SocialObjectives and DRP.SocialObjectives:CanOffer(ply, "courier") or false end,
+		onAccept = function(ply) return DRP.SocialObjectives:Begin(ply, "courier", "social_courier") end
+	},
+	{
+		key = "mercenary_easy", category = "Mercenary", title = "Clear a minor hostile cell",
+		description = "Travel to the marked vacant property and eliminate 3 hostile occupants. Enemies carry reserved salvage and the contract always pays cash.",
+		event = "mercenary_easy_kill", goal = 3, xp = 75, money = 750, priority = 63,
+		eligible = function(ply) return DRP.Mercenaries and DRP.Mercenaries:CanOffer(ply, 1) or false end,
+		onAccept = function(ply) return DRP.Mercenaries:Begin(ply, 1, "mercenary_easy") end
+	},
+	{
+		key = "mercenary_medium", category = "Mercenary", title = "Break a fortified hostile cell",
+		description = "Travel to the marked vacant property and eliminate 5 armed hostiles. Two enemies carry reserved item rewards.",
+		event = "mercenary_medium_kill", goal = 5, xp = 140, money = 1500, priority = 61,
+		eligible = function(ply) return DRP.Mercenaries and DRP.Mercenaries:CanOffer(ply, 2) or false end,
+		onAccept = function(ply) return DRP.Mercenaries:Begin(ply, 2, "mercenary_medium") end
+	},
+	{
+		key = "mercenary_hard", category = "Mercenary", title = "Eliminate an elite hostile unit",
+		description = "Travel to the marked vacant property and eliminate 8 elite hostiles. Three enemies carry high-grade reserved rewards.",
+		event = "mercenary_hard_kill", goal = 8, xp = 240, money = 3000, priority = 59,
+		eligible = function(ply) return DRP.Mercenaries and DRP.Mercenaries:CanOffer(ply, 3) or false end,
+		onAccept = function(ply) return DRP.Mercenaries:Begin(ply, 3, "mercenary_hard") end
 	}
 }
 
@@ -593,6 +638,7 @@ function Objectives:PruneInvalid(ply)
 		local definition = self.Templates[key]
 		if not definition or (definition.eligible and not definition.eligible(ply)) then
 			state.active[key] = nil
+			hook.Run("DRPObjectiveCancelled", ply, key, definition, "Objective requirements changed")
 			removed = true
 		end
 	end
@@ -608,11 +654,26 @@ function Objectives:Accept(ply, key)
 	end
 	local definition = selected and self.Templates[key] or nil
 	if not definition then return false, "That objective is no longer available." end
+	if definition.onAccept then
+		local ok, reason = definition.onAccept(ply, definition)
+		if not ok then return false, reason or "That objective could not be started." end
+	end
 	table.remove(state.offers, selected)
 	state.active[key] = { progress = 0, acceptedAt = CurTime() }
+	hook.Run("DRPObjectiveAccepted", ply, key, definition)
 	self:RefreshOffers(ply)
 	DRP.Net.Notify(ply, "Objective accepted: " .. definition.title, 1)
 	self:Popup(ply, 2, "Objective pinned", definition.title .. " will now remain on your HUD until completed or abandoned.")
+	return true
+end
+
+function Objectives:CancelActive(ply, key, reason, cooldown)
+	local state, definition = stateFor(ply), self.Templates[key]
+	if not state.active[key] then return false end
+	state.active[key] = nil
+	state.cooldowns[key] = CurTime() + math.max(0, tonumber(cooldown) or self.DismissCooldown)
+	hook.Run("DRPObjectiveCancelled", ply, key, definition, tostring(reason or "Objective abandoned"))
+	self:RefreshOffers(ply)
 	return true
 end
 
@@ -621,8 +682,7 @@ function Objectives:Dismiss(ply, key, active)
 	local definition = self.Templates[key]
 	if active and definition and definition.automatic then return false, "Automatic beginner objectives advance when their gameplay outcome is completed." end
 	if active then
-		if not state.active[key] then return false end
-		state.active[key] = nil
+		return self:CancelActive(ply, key, "Objective abandoned", self.DismissCooldown)
 	else
 		local found
 		for index, offered in ipairs(state.offers) do
@@ -682,6 +742,7 @@ end
 
 local auditEvents = {
 	rp_name_changed = "rp_name_changed",
+	identity_registered = "identity_registered",
 	item_pocketed = "item_pocketed",
 	property_lease_funded = "property_lease_funded",
 	property_tenant_joined = "property_tenant_joined",
@@ -771,6 +832,7 @@ function Objectives:Start()
 	end)
 	hook.Add("DRPIncidentResolved", "DRP.Objectives.Incident", function(_, receipt)
 		if not istable(receipt) then return end
+		if receipt.progression == false then return end
 		local instigator = DRP.Players.Online(receipt.instigator_id)
 		local victim = DRP.Players.Online(receipt.victim_id)
 		if ready(instigator) then Objectives:Emit(instigator, "incident_resolved") end

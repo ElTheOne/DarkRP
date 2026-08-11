@@ -1,9 +1,13 @@
 DRP.MayorTablet = DRP.MayorTablet or {}
 
 local Tablet = DRP.MayorTablet
-Tablet.Width = 970
-Tablet.Height = 725
+-- Must match DRPTabletScreen in sh_mayor_tablet.lua. These dimensions cover
+-- the tablet glass edge-to-edge and give the overview columns enough room to
+-- avoid colliding at the right side of the display.
+Tablet.Width = 1080
+Tablet.Height = 760
 Tablet.Page = Tablet.Page or "overview"
+Tablet.CanApproveWarrants = true
 
 surface.CreateFont("DRP.Tablet.Brand", { font = "Roboto", size = 34, weight = 900, extended = true })
 surface.CreateFont("DRP.Tablet.Title", { font = "Roboto", size = 28, weight = 800, extended = true })
@@ -76,15 +80,61 @@ local function entry(parent, placeholder, x, y, width, height)
 	control:SetPaintBackground(false)
 	function control:Paint(w, h)
 		updateCursor(self)
+		local focused = self:HasFocus() or IsValid(self.DRPKeyboardProxy)
 		draw.RoundedBox(9, 0, 0, w, h, Color(4, 14, 29, 245))
-		surface.SetDrawColor(self:HasFocus() and colorAccent or colorLine)
-		surface.DrawOutlinedRect(0, 0, w, h, self:HasFocus() and 2 or 1)
+		surface.SetDrawColor(focused and colorAccent or colorLine)
+		surface.DrawOutlinedRect(0, 0, w, h, focused and 2 or 1)
 		self:DrawTextEntryText(colorText, colorAccent, colorText)
 	end
-	function control:OnMousePressed()
-		self:RequestFocus()
-		self:SetKeyboardInputEnabled(true)
-		self:SetCaretPos(#self:GetValue())
+	function control:DRPBeginTextInput()
+		if IsValid(self.DRPKeyboardProxy) then
+			self.DRPKeyboardProxy:RequestFocus()
+			return
+		end
+		if not (iPhone and IsValid(iPhone.panel2d)) then return end
+
+		-- Manually painted 3D2D panels cannot reliably own native keyboard
+		-- focus. Use a real, invisible child of the full-screen input receiver
+		-- and mirror its value into the field that is rendered on the tablet.
+		local field = self
+		local proxy = vgui.Create("DTextEntry", iPhone.panel2d)
+		proxy:SetPos(-8, -8)
+		proxy:SetSize(1, 1)
+		proxy:SetAlpha(0)
+		proxy:MakePopup()
+		proxy:SetMouseInputEnabled(false)
+		proxy:SetKeyboardInputEnabled(true)
+		proxy:SetUpdateOnType(true)
+		proxy:SetText(tostring(field:GetValue() or ""))
+		proxy:SetCaretPos(#proxy:GetValue())
+		field.DRPKeyboardProxy = proxy
+
+		function proxy:OnValueChange(value)
+			if not IsValid(field) then self:Remove() return end
+			value = tostring(value or "")
+			field:SetText(value)
+			field:SetCaretPos(#value)
+			if isfunction(field.OnValueChange) then field:OnValueChange(value) end
+		end
+		function proxy:OnEnter()
+			self:KillFocus()
+			self:Remove()
+		end
+		function proxy:OnLoseFocus()
+			self:Remove()
+		end
+		function proxy:Think()
+			if not IsValid(field) or not IsValid(iPhone.panel2d) then self:Remove() end
+		end
+		function proxy:OnRemove()
+			if IsValid(field) and field.DRPKeyboardProxy == self then
+				field.DRPKeyboardProxy = nil
+			end
+		end
+		proxy:RequestFocus()
+	end
+	function control:OnMousePressed(code)
+		if code == MOUSE_LEFT then self:DRPBeginTextInput() end
 	end
 	return control
 end
@@ -99,6 +149,23 @@ local function scrollFor(parent, top)
 	local scroll = vgui.Create("DScrollPanel", parent)
 	scroll:SetPos(20, top or 84)
 	scroll:SetSize(parent:GetWide() - 40, parent:GetTall() - (top or 84) - 18)
+	scroll:SetMouseInputEnabled(true)
+	-- The tablet is painted manually in 3D2D, so Derma cannot discover the
+	-- hovered scroll panel by itself. Register the complete viewport with the
+	-- ePhone input bridge; child buttons can still replace it as the deeper
+	-- hover target during their own Paint calls.
+	function scroll:Paint()
+		updateCursor(self)
+	end
+	return scroll
+end
+
+local function enableManualScroll(scroll)
+	if not IsValid(scroll) then return scroll end
+	scroll:SetMouseInputEnabled(true)
+	function scroll:Paint()
+		updateCursor(self)
+	end
 	return scroll
 end
 
@@ -215,8 +282,17 @@ function Tablet:BuildOverview(parent)
 end
 
 function Tablet:BuildTreasury(parent)
-	pageHeading(parent, "Treasury & Funding", "Set taxation, fund public roles and create treasury-backed lotteries.")
+	pageHeading(parent, "Treasury & Funding", "Set taxation, fund public roles, issue fixed-return bonds and create lotteries.")
 	local scroll = scrollFor(parent)
+
+	addActionCard(scroll, "Municipal bond issue",
+		"Opt into treasury-backed borrowing. Sales lock automatically during bond deficit or severe inflation burning.",
+		"Use the buttons to control new sales", {
+			{ label = "OPEN SALES", width = 132, color = colorGreen,
+				callback = function() issue("bonds on") end },
+			{ label = "CLOSE SALES", width = 132, color = colorRed,
+				callback = function() issue("bonds off") end }
+		})
 
 	addActionCard(scroll, "Salary tax", "Applied to every salary and deposited into the public treasury.",
 		"Tax percentage from 0 to 50", {
@@ -333,7 +409,7 @@ function Tablet:BuildPolice(parent)
 		text(body, steamID, "DRP.Tablet.Small", colorMuted, 120, 33, 380, 20)
 		button(body, "COPY STEAMID", 510, 10, 130, 32, function() SetClipboardText(steamID) end)
 
-		local scroll = vgui.Create("DScrollPanel", body)
+		local scroll = enableManualScroll(vgui.Create("DScrollPanel", body))
 		scroll:SetPos(0, 66)
 		scroll:SetSize(body:GetWide(), body:GetTall() - 66)
 
@@ -359,7 +435,7 @@ function Tablet:BuildPolice(parent)
 				"DRP.Tablet.Header", colorText, 18, 38, 500, 28)
 			text(panel, pretty(matter.state) .. "  •  " .. tostring(matter.reason or ""),
 				"DRP.Tablet.Small", colorMuted, 18, 72, panel:GetWide() - 180, 25, true)
-			if matter.pending_warrant then
+			if matter.pending_warrant and self.CanApproveWarrants == true then
 				button(panel, "APPROVE", panel:GetWide() - 132, 37, 112, 38, function()
 					issue("approvewarrant " .. tostring(matter.id))
 					timer.Simple(0.35, function()
@@ -396,7 +472,7 @@ function Tablet:BuildPolice(parent)
 			loading("Refreshing subject index…")
 			service.Request(0)
 		end)
-		local scroll = vgui.Create("DScrollPanel", body)
+		local scroll = enableManualScroll(vgui.Create("DScrollPanel", body))
 		scroll:SetPos(0, 52)
 		scroll:SetSize(body:GetWide(), body:GetTall() - 52)
 
@@ -457,6 +533,16 @@ function Tablet:BuildPolice(parent)
 	if not service.Request(0) then loading("Police database server module is unavailable.") end
 end
 
+function Tablet:BuildWarrants(parent)
+	local policeTablet = DRP.PoliceTablet
+	if policeTablet and isfunction(policeTablet.BuildWarrants) then
+		return policeTablet.BuildWarrants(self, parent, true)
+	end
+	pageHeading(parent, "Warrants", "The police warrant interface is unavailable.")
+	text(parent, "Ensure the Police Operations Tablet client module is mounted.",
+		"DRP.Tablet.Body", colorRed, 22, 100, 700, 35)
+end
+
 function Tablet:ShowPage(key)
 	if not IsValid(self.Content) then return end
 	key = tostring(key or "overview")
@@ -466,14 +552,21 @@ function Tablet:ShowPage(key)
 		overview = self.BuildOverview,
 		treasury = self.BuildTreasury,
 		authority = self.BuildAuthority,
-		police = self.BuildPolice
+		police = self.BuildPolice,
+		warrants = self.BuildWarrants
 	}
 	local builder = builders[key] or builders.overview
 	builder(self, self.Content)
 end
 
 function Tablet:Create()
-	if IsValid(self.Panel) then return self.Panel end
+	if IsValid(self.Panel) then
+		local width, height = self.Panel:GetSize()
+		if width == self.Width and height == self.Height then return self.Panel end
+		self.Panel:Remove()
+		self.Panel = nil
+		self.Content = nil
+	end
 	local root = vgui.Create("EditablePanel")
 	root:SetSize(self.Width, self.Height)
 	root:SetPaintedManually(true)
@@ -495,7 +588,8 @@ function Tablet:Create()
 		{ key = "overview", label = "OVERVIEW", sub = "Live city state" },
 		{ key = "treasury", label = "TREASURY", sub = "Tax and allocations" },
 		{ key = "authority", label = "AUTHORITY", sub = "Executive actions" },
-		{ key = "police", label = "POLICE DB", sub = "Records and warrants" }
+		{ key = "police", label = "POLICE DB", sub = "Records and history" },
+		{ key = "warrants", label = "WARRANTS", sub = "Approve or reject" }
 	}
 	for index, item in ipairs(nav) do
 		local data = item
@@ -586,3 +680,6 @@ end
 
 hook.Add("DRPGovernmentChanged", "DRP.MayorTablet.Government", refreshCurrentPage)
 hook.Add("DRPLockdownChanged", "DRP.MayorTablet.Lockdown", refreshCurrentPage)
+hook.Add("DRPWarrantsChanged", "DRP.MayorTablet.Warrants", function()
+	if Tablet.Page == "warrants" then refreshCurrentPage() end
+end)

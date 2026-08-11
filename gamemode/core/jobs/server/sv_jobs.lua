@@ -70,6 +70,7 @@ local roleSelectableWeaponSet = {
 	weapon_drp_kidnap_baton = "canKidnap",
 	weapon_drp_blindfold = "canKidnap",
 	weapon_drp_gag = "canKidnap",
+	weapon_drp_police_tablet = "canUsePoliceOperationsTablet",
 	weapon_drp_mayor_tablet = "canUsePoliceTablet"
 }
 
@@ -339,7 +340,7 @@ function Jobs.Set(ply, id, initial)
 			DRP.Profile.Finish("jobs.set", started)
 			return false
 		end
-		for _, candidate in ipairs(player.GetAll()) do
+		for _, candidate in ipairs((DRP.Players and DRP.Players.List) or player.GetAll()) do
 			if candidate ~= ply and IsValid(candidate) and candidate:DRPJobID() == DRP.Job.MOB_BOSS then
 				DRP.Profile.Finish("jobs.set", started)
 				return false
@@ -405,19 +406,30 @@ end)
 -- Government transitions are staged to avoid a job-change hitch. Guarantee
 -- the role-specific tablet at the end of that transition even if an older
 -- loadout cache existed before the SWEP was registered.
-hook.Add("DRPJobChanged", "DRP.Jobs.MayorTablet", function(ply, _, current)
+hook.Add("DRPJobChanged", "DRP.Jobs.RoleTablets", function(ply)
 	for _, delay in ipairs({ Jobs.ApplyStageDelay * 4, 0.5, 1 }) do
 		timer.Simple(delay, function()
 			if not IsValid(ply) or not ply:Alive() then return end
-			if current == DRP.Job.MAYOR and ply:DRPJobID() == DRP.Job.MAYOR then
+			local current = ply:DRPJobID()
+			if current == DRP.Job.MAYOR then
+				if ply:HasWeapon("weapon_drp_police_tablet") then ply:StripWeapon("weapon_drp_police_tablet") end
 				if not ply:HasWeapon("weapon_drp_mayor_tablet") then
 					local weapon = ply:Give("weapon_drp_mayor_tablet")
 					if not IsValid(weapon) then
 						ErrorNoHalt("[DRP JOBS] failed to grant registered Mayor tablet\n")
 					end
 				end
-			elseif ply:HasWeapon("weapon_drp_mayor_tablet") then
-				ply:StripWeapon("weapon_drp_mayor_tablet")
+			elseif current == DRP.Job.POLICE then
+				if ply:HasWeapon("weapon_drp_mayor_tablet") then ply:StripWeapon("weapon_drp_mayor_tablet") end
+				if not ply:HasWeapon("weapon_drp_police_tablet") then
+					local weapon = ply:Give("weapon_drp_police_tablet")
+					if not IsValid(weapon) then
+						ErrorNoHalt("[DRP JOBS] failed to grant registered Police tablet\n")
+					end
+				end
+			else
+				if ply:HasWeapon("weapon_drp_mayor_tablet") then ply:StripWeapon("weapon_drp_mayor_tablet") end
+				if ply:HasWeapon("weapon_drp_police_tablet") then ply:StripWeapon("weapon_drp_police_tablet") end
 			end
 		end)
 	end
@@ -430,16 +442,20 @@ concommand.Add("drp_toolgun_status", function(ply)
 	local toolCount = istable(stored and stored.Tool) and table.Count(stored.Tool) or 0
 	local precisionReady = istable(stored and stored.Tool) and istable(stored.Tool.precision)
 	local stackerReady = istable(stored and stored.Tool) and istable(stored.Tool.stacker_improved)
+	local routeReady = istable(stored and stored.Tool) and istable(stored.Tool.drp_police_route)
 	local precisionAction = precisionReady and isfunction(stored.Tool.precision.LeftClick)
 	local stackerAction = stackerReady and isfunction(stored.Tool.stacker_improved.LeftClick)
+	local routeAction = routeReady and isfunction(stored.Tool.drp_police_route.LeftClick)
 	local precisionVersion = precisionReady and stored.Tool.precision.DRPBundledVersion or "missing"
 	local stackerVersion = stackerReady and stored.Tool.stacker_improved.DRPBundledVersion or "missing"
 	local target = IsValid(ply) and ply or nil
 	print(string.format(
-		"[DRP TOOLGUN] build=%s registered=%s tools=%d precision=%s/%s/%s stacker_improved=%s/%s/%s physgun=%s%s",
+		"[DRP TOOLGUN] build=%s registered=%s tools=%d police_route=%s/%s precision=%s/%s/%s stacker_improved=%s/%s/%s physgun=%s%s",
 		tostring(DRP.Toolgun and DRP.Toolgun.Build or "unknown"),
 		tostring(stored ~= nil),
 		toolCount,
+		tostring(routeReady),
+		tostring(routeAction),
 		tostring(precisionReady),
 		tostring(precisionAction),
 		tostring(precisionVersion),

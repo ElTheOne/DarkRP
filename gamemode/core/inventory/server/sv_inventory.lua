@@ -517,6 +517,15 @@ function Inventory.PocketAimed(ply)
 	if DRP.Medical and DRP.Medical:IsCorpse(entity) then notify(ply, "A player's body cannot be held.", 3) return false end
 	if entity:GetNW2Bool("DRPJailer", false) then notify(ply, "The jailer cannot be held.", 3) return false end
 	if entity.DRPContractLocked then notify(ply, "That item is reserved by marketplace escrow.", 3) return false end
+	if entity.DRPMercenaryRewardOwnerID and entity.DRPMercenaryRewardOwnerID ~= ply:SteamID64() then
+		notify(ply, "That mercenary reward is reserved for its contractor.", 3)
+		return false
+	end
+	if entity.DRPMercenaryRewardMissionID and DRP.Mercenaries
+		and DRP.Mercenaries.ByID[entity.DRPMercenaryRewardMissionID] then
+		notify(ply, "Clear the remaining hostiles before collecting contract rewards.", 3)
+		return false
+	end
 	local owner = DRP.Props and DRP.Props.Owner(entity)
 	if entity:GetClass() ~= "drp_drug" and IsValid(owner) and owner ~= ply then notify(ply, "You cannot take another player's item.", 3) return false end
 	local record = serialize(entity)
@@ -1083,6 +1092,122 @@ function Inventory.BuildSnapshot(ply)
 	local snapshot = { schema = Inventory.SchemaVersion, width = Inventory.GridWidth, height = Inventory.GridHeight, selected = ply.DRPSelectedPocketID or "", revision = ply.DRPPocketRevision or 0, items = {}, equipped = table.Copy(equipment(ply)) }
 	for _, record in ipairs(items(ply)) do snapshot.items[#snapshot.items + 1] = clientRecord(record) end
 	return snapshot
+end
+
+local function adminOnlinePlayer(steamID64)
+	if DRP.Players and DRP.Players.Online then return DRP.Players.Online(steamID64) end
+	for _, candidate in ipairs((DRP.Players and DRP.Players.List) or player.GetAll()) do
+		if IsValid(candidate) and candidate:SteamID64() == steamID64 then return candidate end
+	end
+end
+
+local function adminPersistentSnapshot(decoded)
+	local snapshot = {
+		schema = Inventory.SchemaVersion, width = Inventory.GridWidth, height = Inventory.GridHeight,
+		selected = tostring(decoded.selected_id or ""), revision = tonumber(decoded.updated_at_ms) or 0,
+		items = {}, equipped = istable(decoded.equipped) and table.Copy(decoded.equipped) or {}
+	}
+	for _, record in ipairs(decoded.items or {}) do
+		if istable(record) then snapshot.items[#snapshot.items + 1] = clientRecord(record) end
+	end
+	return snapshot
+end
+
+local function adminRecord(data)
+	data = istable(data) and data or {}
+	local kind = string.lower(string.sub(tostring(data.kind or "resource"), 1, 16))
+	local allowed = { weapon = true, ammo = true, drug = true, resource = true, attachment = true, schematic = true }
+	if not allowed[kind] then return nil, "Unsupported Hands item type." end
+	local key = string.sub(string.Trim(tostring(data.key or "")), 1, 128)
+	if key == "" then return nil, "An item class or identifier is required." end
+	local record = { kind = kind, label = string.sub(string.Trim(tostring(data.label or key)), 1, 64), amount = math.max(1, math.floor(tonumber(data.amount) or 1)) }
+	if kind == "weapon" then
+		if not weapons.GetStored(key) and not (list.Get("Weapon") or {})[key] then return nil, "That weapon class is not registered." end
+		record.class = key
+	elseif kind == "ammo" then record.class, record.ammo_type = "drp_ammo_stack", key
+	elseif kind == "drug" then
+		if not DRP.Drugs or not DRP.Drugs.Definitions[key] then return nil, "That drug is not registered." end
+		record.class, record.drug = "drp_drug", key
+	elseif kind == "resource" then record.class, record.resource = "drp_crafting_item", string.lower(string.sub(key, 1, 32))
+	elseif kind == "attachment" then record.class, record.attachment = "drp_attachment_item", key
+	elseif kind == "schematic" then record.class, record.schematic, record.grade = "drp_schematic_item", key, math.Clamp(math.floor(tonumber(data.grade) or 1), 1, 6) end
+	return record
+end
+
+-- HeadAdmin database tooling routes Hands edits through the inventory authority
+-- so online state, local recovery and the durable row cannot diverge.
+function Inventory.AdminEdit(actor, steamID64, operation, data, callback)
+	callback = isfunction(callback) and callback or function() end
+	steamID64, operation = tostring(steamID64 or ""), tostring(operation or "snapshot")
+	if not IsValid(actor) or not DRP.Admin or not DRP.Admin.CanSetRanks(actor) or not string.match(steamID64, "^%d%d%d%d%d%d%d%d%d%d%d%d%d%d%d%d%d$") then callback(false, "HeadAdmin+ and a valid SteamID64 are required.") return false end
+	local target = adminOnlinePlayer(steamID64)
+	if IsValid(target) then
+		local ok, reason = true
+		data = istable(data) and data or {}
+		if operation == "move" then ok = Inventory.MoveItem(target, data.id, data.x, data.y, data.rotated == true)
+		elseif operation == "remove" then ok = Inventory.TakeRawByID(target, data.id) ~= nil
+		elseif operation == "amount" then
+			local record = findByID(target, tostring(data.id or ""))
+			if not record then ok = false else record.amount = math.Clamp(math.floor(tonumber(data.amount) or 1), 1, stackLimit(record)) Inventory.Sync(target, false) Inventory.QueueSave(target) end
+		elseif operation == "add" then
+			local record, adminRecordReason
+			record, adminRecordReason = adminRecord(data)
+			if not record then ok, reason = false, adminRecordReason else ok = Inventory.InsertRaw(target, record) end
+		elseif operation ~= "snapshot" then ok = false end
+		if not ok then callback(false, reason or "The live Hands edit was rejected.") return false end
+		if operation ~= "snapshot" then Inventory.SaveNow(target) if DRP.Audit then DRP.Audit.Log(actor, "hands_database_edit", target, operation) end end
+		callback(true, Inventory.BuildSnapshot(target))
+		return true
+	end
+
+	DRP.Storage.LoadPocket(steamID64, function(success, payload, loadReason)
+		if not success then callback(false, loadReason or "The Hands row could not be loaded.") return end
+		local decoded = util.JSONToTable(payload or "")
+		if not istable(decoded) then decoded = { schema = Inventory.SchemaVersion, items = {}, recovery = {}, equipped = {}, selected_id = "", next_id = 0 } end
+		decoded.items = istable(decoded.items) and decoded.items or {}
+		decoded.equipped = istable(decoded.equipped) and decoded.equipped or {}
+		data = istable(data) and data or {}
+		local ok, reason = true
+		if operation == "move" then
+			local record
+			for _, item in ipairs(decoded.items) do if tostring(item.id) == tostring(data.id) then record = item break end end
+			if not record then ok = false else
+				local placed, width, height = Inventory.CanPlaceRecords(decoded.items, record, data.x, data.y, data.rotated == true, record.id)
+				if not placed then ok = false else record.x, record.y, record.w, record.h, record.rotated = math.floor(data.x), math.floor(data.y), width, height, data.rotated == true end
+			end
+		elseif operation == "remove" then
+			local found = false
+			for index, item in ipairs(decoded.items) do if tostring(item.id) == tostring(data.id) then table.remove(decoded.items, index) found = true break end end
+			ok = found
+			if found then for slot, id in pairs(decoded.equipped) do if tostring(id) == tostring(data.id) then decoded.equipped[slot] = nil end end end
+		elseif operation == "amount" then
+			local record
+			for _, item in ipairs(decoded.items) do if tostring(item.id) == tostring(data.id) then record = item break end end
+			if not record then ok = false else record.amount = math.Clamp(math.floor(tonumber(data.amount) or 1), 1, stackLimit(record)) end
+		elseif operation == "add" then
+			local record, addReason
+			record, addReason = adminRecord(data)
+			if not record then ok, reason = false, addReason else
+				decoded.next_id = math.max(0, math.floor(tonumber(decoded.next_id) or 0)) + 1
+				record.id = "admin_" .. steamID64 .. "_" .. os.time() .. "_" .. decoded.next_id
+				local x, y, rotated, width, height = findSpace(decoded.items, record, false)
+				if not x then ok, reason = false, "There is no room for that item." else record.x, record.y, record.w, record.h, record.rotated = x, y, width, height, rotated decoded.items[#decoded.items + 1] = record end
+			end
+		elseif operation ~= "snapshot" then ok = false end
+		if not ok then callback(false, reason or "The offline Hands edit was rejected.") return end
+		if operation == "snapshot" then callback(true, adminPersistentSnapshot(decoded)) return end
+		decoded.schema = Inventory.SchemaVersion
+		decoded.updated_at_ms = math.max(os.time() * 1000 + math.floor((RealTime() % 1) * 1000), math.floor(tonumber(decoded.updated_at_ms) or 0) + 1)
+		local encoded = util.TableToJSON(decoded, false)
+		if not encoded or #encoded > Inventory.MaxPayloadBytes then callback(false, "The edited Hands payload is too large.") return end
+		DRP.Storage.SavePocket(steamID64, encoded, function(saved, saveReason)
+			if not saved then callback(false, saveReason or "The Hands edit could not be saved.") return end
+			writeLocalPayload(steamID64, encoded)
+			if DRP.Audit then DRP.Audit.Log(actor, "hands_database_edit", steamID64, operation) end
+			callback(true, adminPersistentSnapshot(decoded))
+		end)
+	end)
+	return true
 end
 
 local function sendCompressed(name, ply, payload)

@@ -3,6 +3,7 @@ local REQUEST = "drp_roles_request_v1"
 
 local Roles = {
 	MaximumMetric = 65535,
+	NormalizedBehavior = setmetatable({}, { __mode = "k" }),
 	Metrics = {
 		narcotics = true,
 		forceDrugging = true,
@@ -26,6 +27,7 @@ local function cleanMetric(value)
 end
 
 function Roles:Normalize(value)
+	if istable(value) and self.NormalizedBehavior[value] then return value end
 	if isstring(value) then value = util.JSONToTable(value) end
 	value = istable(value) and value or {}
 	local normalized = {}
@@ -48,7 +50,18 @@ function Roles:Normalize(value)
 	-- The receipt list is authoritative. Repair older snapshots that contained
 	-- a scalar without its deduplication receipts instead of inventing victims.
 	normalized.hitEvidence = #normalized.hitEvidenceVictims
+	self.NormalizedBehavior[normalized] = true
 	return normalized
+end
+
+function Roles:EnsureBehavior(ply)
+	if not IsValid(ply) then return self:Normalize() end
+	local behavior = ply.DRPRoleBehavior
+	if not istable(behavior) or not self.NormalizedBehavior[behavior] then
+		behavior = self:Normalize(behavior)
+		ply.DRPRoleBehavior = behavior
+	end
+	return behavior
 end
 
 function Roles:InitializePlayer(ply, value)
@@ -58,14 +71,13 @@ function Roles:InitializePlayer(ply, value)
 end
 
 function Roles:Serialize(ply)
-	local behavior = IsValid(ply) and self:Normalize(ply.DRPRoleBehavior) or self:Normalize()
+	local behavior = self:EnsureBehavior(ply)
 	return util.TableToJSON(behavior, false) or "{}"
 end
 
 function Roles:GetMetric(ply, metric)
 	if not IsValid(ply) or not self.Metrics[metric] then return 0 end
-	ply.DRPRoleBehavior = self:Normalize(ply.DRPRoleBehavior)
-	return ply.DRPRoleBehavior[metric] or 0
+	return self:EnsureBehavior(ply)[metric] or 0
 end
 
 function Roles:CanAccessRoleTools(ply, jobKey)
@@ -100,7 +112,7 @@ function Roles:Resolve(civic, behavior)
 end
 
 function Roles:MobBossHolder(excluded)
-	for _, candidate in ipairs(player.GetAll()) do
+	for _, candidate in ipairs((DRP.Players and DRP.Players.List) or player.GetAll()) do
 		if candidate ~= excluded and IsValid(candidate) and candidate:IsPlayer() and candidate:DRPJobID() == DRP.Job.MOB_BOSS then
 			return candidate
 		end
@@ -143,7 +155,7 @@ function Roles:FillMobBossVacancy(excluded)
 	if IsValid(self:MobBossHolder(excluded)) then return false end
 
 	local eligible = {}
-	for _, candidate in ipairs(player.GetAll()) do
+	for _, candidate in ipairs((DRP.Players and DRP.Players.List) or player.GetAll()) do
 		if candidate ~= excluded
 			and IsValid(candidate)
 			and candidate:IsPlayer()
@@ -176,10 +188,9 @@ end
 function Roles:BuildSnapshot(ply)
 	local derived, reason = self:DerivedJob(ply)
 	local mobBoss = self:MobBossHolder()
-	local publicBehavior = self:Normalize(ply.DRPRoleBehavior)
-	publicBehavior.hitEvidenceVictims = nil
-	publicBehavior.kidnapCooldownUntil = nil
-	publicBehavior.kidnapImmunityUntil = nil
+	local behavior = self:EnsureBehavior(ply)
+	local publicBehavior = {}
+	for metric in pairs(self.Metrics) do publicBehavior[metric] = behavior[metric] or 0 end
 	return {
 		civic = DRP.Civic and DRP.Civic:Get(ply) or 0,
 		current = ply:DRPJobID(),
@@ -231,11 +242,11 @@ function Roles:Record(ply, metric, amount, reason)
 	if not IsValid(ply) or not ply:IsPlayer() or not self.Metrics[metric] then return false end
 	amount = math.floor(tonumber(amount) or 0)
 	if amount == 0 then return false end
-	ply.DRPRoleBehavior = self:Normalize(ply.DRPRoleBehavior)
-	local previous = ply.DRPRoleBehavior[metric]
+	local behavior = self:EnsureBehavior(ply)
+	local previous = behavior[metric]
 	local updated = math.Clamp(previous + amount, 0, self.MaximumMetric)
 	if updated == previous then return false end
-	ply.DRPRoleBehavior[metric] = updated
+	behavior[metric] = updated
 	if DRP.Economy then DRP.Economy.QueueSave(ply) end
 	if ply:DRPReady() then
 		self:Evaluate(ply, reason, false)
@@ -249,17 +260,17 @@ function Roles:RecordHitEvidence(ply, victimSteamID64, incidentID)
 	victimSteamID64 = string.match(tostring(victimSteamID64 or ""), "^%d+$")
 	if not victimSteamID64 or #victimSteamID64 < 16 or #victimSteamID64 > 20
 		or victimSteamID64 == ply:SteamID64() then return false, self:GetMetric(ply, "hitEvidence") end
-	ply.DRPRoleBehavior = self:Normalize(ply.DRPRoleBehavior)
-	for _, existing in ipairs(ply.DRPRoleBehavior.hitEvidenceVictims) do
-		if existing == victimSteamID64 then return false, ply.DRPRoleBehavior.hitEvidence end
+	local behavior = self:EnsureBehavior(ply)
+	for _, existing in ipairs(behavior.hitEvidenceVictims) do
+		if existing == victimSteamID64 then return false, behavior.hitEvidence end
 	end
-	ply.DRPRoleBehavior.hitEvidenceVictims[#ply.DRPRoleBehavior.hitEvidenceVictims + 1] = victimSteamID64
-	ply.DRPRoleBehavior.hitEvidence = #ply.DRPRoleBehavior.hitEvidenceVictims
+	behavior.hitEvidenceVictims[#behavior.hitEvidenceVictims + 1] = victimSteamID64
+	behavior.hitEvidence = #behavior.hitEvidenceVictims
 	if DRP.Economy then DRP.Economy.QueueSave(ply) end
 	if ply:DRPReady() then self:Evaluate(ply, "authenticated hit evidence", false) end
-	hook.Run("DRPRoleBehaviorChanged", ply, "hitEvidence", ply.DRPRoleBehavior.hitEvidence - 1,
-		ply.DRPRoleBehavior.hitEvidence, "photographic proof from incident #" .. tostring(incidentID or 0))
-	return true, ply.DRPRoleBehavior.hitEvidence
+	hook.Run("DRPRoleBehaviorChanged", ply, "hitEvidence", behavior.hitEvidence - 1,
+		behavior.hitEvidence, "photographic proof from incident #" .. tostring(incidentID or 0))
+	return true, behavior.hitEvidence
 end
 
 function Roles:Start() end

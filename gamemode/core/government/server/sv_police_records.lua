@@ -377,7 +377,7 @@ DRP.Net.Receive(PoliceRecords.RequestMessage, function(_, ply)
 	if not DRP.Phone or not DRP.Phone:HasPoliceTerminal(ply) then
 		DRP.Net.Notify(ply, job.key == "mayor"
 			and "Equip the mayoral tablet to use the police database."
-			or "Equip your ePhone to use the police database.", 2)
+			or "Equip the Police Operations Tablet to use the police database.", 2)
 		return
 	end
 	local mode = net.ReadUInt(2)

@@ -8,6 +8,18 @@ local enabled = CreateClientConVar(
 	"Use the DarkRP neutral lighting grade"
 )
 
+-- A color-modify pass touches the entire framebuffer every frame. It is purely
+-- cosmetic, so the performance profile keeps it off by default while leaving
+-- incident/drug effects authoritative and available. Players who prefer the
+-- grade can opt in without restarting.
+local cosmeticPostprocess = CreateClientConVar(
+	"drp_client_cosmetic_postprocess",
+	"0",
+	true,
+	false,
+	"Allow optional DarkRP cosmetic full-screen post processing"
+)
+
 local strength = CreateClientConVar(
 	"drp_neutral_lighting_strength",
 	"1",
@@ -46,9 +58,8 @@ local neutral = {
 
 local output = {}
 
-hook.Add("RenderScreenspaceEffects", "DRP.NeutralLighting", function()
-	if not enabled:GetBool() or not DrawColorModify then return end
-
+local function drawNeutralLighting()
+	if not DrawColorModify then return end
 	local amount = math.Clamp(strength:GetFloat(), 0, 1)
 	if amount <= 0 then return end
 
@@ -57,7 +68,19 @@ hook.Add("RenderScreenspaceEffects", "DRP.NeutralLighting", function()
 	end
 
 	DrawColorModify(output)
-end)
+end
+
+local function updateNeutralLightingHook()
+	if cosmeticPostprocess:GetBool() and enabled:GetBool() then
+		hook.Add("RenderScreenspaceEffects", "DRP.NeutralLighting", drawNeutralLighting)
+	else
+		hook.Remove("RenderScreenspaceEffects", "DRP.NeutralLighting")
+	end
+end
+
+cvars.AddChangeCallback("drp_client_cosmetic_postprocess", updateNeutralLightingHook, "DRP.NeutralLighting")
+cvars.AddChangeCallback("drp_neutral_lighting", updateNeutralLightingHook, "DRP.NeutralLighting")
+updateNeutralLightingHook()
 
 -- ARC9's full render-target scope path can display an error texture over the
 -- entire screen when a client cannot compile one of its scope shaders or RT
@@ -127,7 +150,12 @@ end
 -- occupies most of the screen. Hide only the first-person weapon model while
 -- an RT optic is being used and draw a neutral reticle over ARC9's normal
 -- camera zoom. Iron sights and hip-fire weapon rendering remain untouched.
+local scopeCacheFrame = -1
+local scopeCacheWeapon
 local function activeARC9Scope()
+	local frame = FrameNumber()
+	if scopeCacheFrame == frame then return scopeCacheWeapon end
+	scopeCacheFrame, scopeCacheWeapon = frame, nil
 	local player = LocalPlayer()
 	if not IsValid(player) or player:ShouldDrawLocalPlayer() then return end
 
@@ -137,7 +165,8 @@ local function activeARC9Scope()
 
 	local ok, scoped = pcall(weapon.IsUsingRTScope, weapon)
 	if not ok or not scoped then return end
-	return weapon
+	scopeCacheWeapon = weapon
+	return scopeCacheWeapon
 end
 
 hook.Add("PreDrawViewModel", "DRP.ARC9SafeADSViewModel", function(_, _, weapon)
@@ -170,7 +199,7 @@ hook.Add("InitPostEntity", "DRP.ARC9ScopeCompatibility", function()
 	timer.Simple(0, applyARC9ScopeCompatibility)
 	-- ARC9 can recreate its hooks after a clientside reload or settings reset.
 	-- Reassert safe ADS mode cheaply instead of letting the broken RT remain active.
-	timer.Create("DRP.ARC9ScopeCompatibility", 2, 0, applyARC9ScopeCompatibility)
+		timer.Create("DRP.ARC9ScopeCompatibility", 2, 15, applyARC9ScopeCompatibility)
 end)
 
 hook.Add("OnReloaded", "DRP.ARC9ScopeCompatibility", function()

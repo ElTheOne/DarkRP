@@ -13,7 +13,7 @@ DRP.ObjectivesClient = DRP.ObjectivesClient or {
 
 local Client = DRP.ObjectivesClient
 local showWelcome, enqueuePopup
-CreateClientConVar("drp_objectives_hud", "1", true, false, "Show accepted DarkRP objectives on the HUD.")
+local objectivesHud = CreateClientConVar("drp_objectives_hud", "1", true, false, "Show accepted DarkRP objectives on the HUD.")
 
 local function readDefinition()
 	return {
@@ -83,6 +83,12 @@ net.Receive(SYNC, function()
 		local compressed = net.ReadData(roleLength)
 		roleGoal = util.JSONToTable(util.Decompress(compressed) or "")
 		if not istable(roleGoal) then roleGoal = nil end
+		if roleGoal then
+			roleGoal._hudStep = roleGoal.steps and roleGoal.steps[#roleGoal.steps] or {}
+			for _, candidate in ipairs(roleGoal.steps or {}) do
+				if not candidate.complete then roleGoal._hudStep = candidate break end
+			end
+		end
 	end
 	local guide = {
 		completed = net.ReadUInt(4),
@@ -128,8 +134,7 @@ end
 local function trackerHeight()
 	local government = DRP.ClientGovernment
 	if government and government.phase == 3 then return 98 end
-	local convar = GetConVar("drp_objectives_hud")
-	if convar and not convar:GetBool() then return 0 end
+	if not objectivesHud:GetBool() then return 0 end
 	local count = #(Client.Active or {})
 	if count == 0 and not Client.RoleGoal then return 0 end
 
@@ -405,7 +410,7 @@ function Client.BuildPage(parent)
 	local guide = Client.Guide or {}
 	if (guide.total or 0) > 0 and (guide.completed or 0) < guide.total then
 		local guideNames = {
-			welcome_identity = "Choose your identity",
+			welcome_identity = "Register with the Councilman",
 			beginner_property_purchase = "Purchase your first property",
 			welcome_pockets = "Secure an item in Hands",
 			beginner_mugging = "Learn the mugging system",
@@ -565,7 +570,8 @@ hook.Add("HUDPaint", "DRP.Objectives.Tracker", function()
 			"DRP.Admin.Small", x + 15, y + 80, observer and colors.muted or colors.accent, TEXT_ALIGN_LEFT, TEXT_ALIGN_CENTER)
 		return
 	end
-	if not GetConVar("drp_objectives_hud"):GetBool() or (#Client.Active == 0 and not Client.RoleGoal) then return end
+	if DRP.MuggingClient and DRP.MuggingClient.ShouldHideObjectives and DRP.MuggingClient.ShouldHideObjectives() then return end
+	if not objectivesHud:GetBool() or (#Client.Active == 0 and not Client.RoleGoal) then return end
 	local colors = DRP.UI.Colors
 	local width, cardHeight = math.min(330, math.max(260, ScrW() * 0.24), ScrW() - 40), 62
 	local x = ScrW() - width - 26
@@ -573,11 +579,12 @@ hook.Add("HUDPaint", "DRP.Objectives.Tracker", function()
 	local activeOffset = 0
 	if Client.RoleGoal then
 		local goal = Client.RoleGoal
-		local tint = Color(goal.color and goal.color.r or 157, goal.color and goal.color.g or 120, goal.color and goal.color.b or 255)
-		local step = goal.steps and goal.steps[#goal.steps] or {}
-		for _, candidate in ipairs(goal.steps or {}) do
-			if not candidate.complete then step = candidate break end
+		local tint = goal._hudTint
+		if not tint then
+			tint = Color(goal.color and goal.color.r or 157, goal.color and goal.color.g or 120, goal.color and goal.color.b or 255)
+			goal._hudTint = tint
 		end
+		local step = goal._hudStep or {}
 		local height = 78
 		draw.RoundedBox(7, x, y, width, height, colors.panel)
 		draw.RoundedBoxEx(7, x, y, 4, height, tint, true, false, true, false)

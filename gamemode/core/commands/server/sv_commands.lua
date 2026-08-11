@@ -23,6 +23,14 @@ local function findPlayer(fragment)
 end
 
 function Commands.rpname(ply, values)
+	if DRP.Identity and not DRP.Identity:IsRegistered(ply) then
+		if ply:DRPJob().isHobo then
+			DRP.Net.Notify(ply, "Hobos cannot register an identity. Purchase a property and establish yourself first.", 3)
+		else
+			DRP.Net.Notify(ply, "Register your first identity with the Councilman at the police station.", 3)
+		end
+		return
+	end
 	local name = string.Trim(table.concat(values, " "))
 	name = string.gsub(string.gsub(name, "%c", ""), "%s+", " ")
 	if #name < 3 or #name > 48 then DRP.Net.Notify(ply, "Usage: /rpname <name> (3-48 characters).", 3) return end
@@ -34,9 +42,11 @@ function Commands.rpname(ply, values)
 	ply.DRPRPNameValue = name
 	if DRP.Roster then DRP.Roster:Update(ply, DRP.Roster.Field.RP_NAME) end
 	DRP.Economy.QueueSave(ply)
+	if DRP.Identity then DRP.Identity:UpdateName(ply, name) end
 	DRP.Net.Notify(ply, "Your RP name is now " .. name .. ".", 1)
 	if DRP.Audit then DRP.Audit.Log(ply, "rp_name_changed", nil, previous .. " -> " .. name) end
 	if DRP.Government then DRP.Government.Sync() end
+	hook.Run("DRPGameplayEvent", ply, "rp_name_changed", 1)
 end
 
 Commands.name = Commands.rpname
@@ -127,11 +137,11 @@ function Commands.give(ply, values)
 	local amount = math.floor(tonumber(values[2]) or 0)
 	if not IsValid(target) or target == ply then DRP.Net.Notify(ply, "Usage: /give <unique name> <amount>", 3) return end
 	if amount < 1 or amount > 100000 then DRP.Net.Notify(ply, "Amount must be between 1 and 100000.", 3) return end
-	if not DRP.Economy.Take(ply, amount) then DRP.Net.Notify(ply, "You cannot afford that.", 3) return end
-	DRP.Economy.Add(target, amount)
+	local transferred, received = DRP.Economy.Transfer(ply, target, amount, "player gift")
+	if not transferred then DRP.Net.Notify(ply, "You cannot afford that.", 3) return end
 	if DRP.Audit then DRP.Audit.Log(ply, "money_given", target, amount) end
 	DRP.Net.Notify(ply, "Gave $" .. amount .. " to " .. target:Nick() .. ".", 1)
-	DRP.Net.Notify(target, ply:Nick() .. " gave you $" .. amount .. ".", 1)
+	DRP.Net.Notify(target, ply:Nick() .. " gave you $" .. received .. ".", 1)
 end
 
 function Commands.dropmoney(ply, values)
@@ -231,8 +241,7 @@ function Commands.tip(ply, values)
 	local jar = ply:GetEyeTrace().Entity
 	if amount < 1 or not IsValid(jar) or jar:GetClass() ~= "drp_tip_jar" then DRP.Net.Notify(ply, "Look at a tip jar and use /tip <amount>.", 3) return end
 	local owner = DRP.Props.Owner(jar)
-	if not IsValid(owner) or owner == ply or not DRP.Economy.Take(ply, amount, "tip") then return end
-	DRP.Economy.Add(owner, amount, ply:DRPName() .. " tipped your jar")
+	if not IsValid(owner) or owner == ply or not DRP.Economy.Transfer(ply, owner, amount, "tip") then return end
 end
 
 function Commands.setevidence(ply)
@@ -255,6 +264,13 @@ end
 
 function Commands.approvewarrant(ply, values)
 	if not DRP.Legal.ApproveWarrant(ply, values[1]) then DRP.Net.Notify(ply, "That pending warrant cannot be approved.", 3) end
+end
+
+function Commands.rejectwarrant(ply, values)
+	local reason = table.concat(values, " ", 2)
+	if not DRP.Legal.RejectWarrant(ply, values[1], reason) then
+		DRP.Net.Notify(ply, "Usage: /rejectwarrant <warrant ID> [reason] (Mayor only).", 3)
+	end
 end
 
 function Commands.search(ply, values)
@@ -735,6 +751,28 @@ function Commands.recordincident(ply)
 	net.Send(ply)
 end
 
+function Commands.bonds(ply, values)
+	if not DRP.Bonds then DRP.Net.Notify(ply, "The municipal bond service is unavailable.", 3) return end
+	local mode = string.lower(tostring(values[1] or ""))
+	if mode ~= "on" and mode ~= "off" then
+		DRP.Net.Notify(ply, "Usage: /bonds <on|off>", 3)
+		return
+	end
+	DRP.Bonds:SetIssuance(ply, mode == "on")
+end
+
+function Commands.bondstatus(ply)
+	if not DRP.Bonds then DRP.Net.Notify(ply, "The municipal bond service is unavailable.", 3) return end
+	local status = DRP.Bonds:Status()
+	DRP.Net.Notify(ply, string.format(
+		"Bonds %s • principal $%s • promised $%s • debt $%s • deficit $%s • burn %.2f%%.",
+		status.issuance and "OPEN" or "CLOSED",
+		string.Comma(status.principal or 0), string.Comma(status.liability or 0),
+		string.Comma(status.debt or 0), string.Comma(status.deficit or 0),
+		(tonumber(status.burnRate) or 0) * 100
+	), (status.deficit or 0) > 0 and 3 or 0)
+end
+
 local function adminTargetAction(ply, values, action, command, amountIndex, minimum)
 	local usage = "Usage: /" .. command .. " <unique name>" .. (amountIndex and " <amount>" or "")
 	local target = commandTarget(ply, values[1], usage)
@@ -769,6 +807,7 @@ function Commands.help(ply)
 	DRP.Net.Notify(ply, "/trust shows your trust calculation. /discordlink, /discordverify and /discordunlink manage Discord verification.", 0)
 	DRP.Net.Notify(ply, "/civichint explains which lawful and criminal outcomes change civic standing. Kidnappers may use /releasekidnap.", 0)
 	DRP.Net.Notify(ply, "/recordincident starts or stops a clientside demo. Automatic incident recording is available in F4 > Settings.", 0)
+	DRP.Net.Notify(ply, "/bondstatus shows municipal bond solvency. The sitting Mayor controls issuance with /bonds on or /bonds off.", 0)
 end
 
 function GM:PlayerSay(ply, text, teamChat)

@@ -30,7 +30,9 @@ concommand.Add("drp_save_all", function(ply)
 	if DRP.Properties then DRP.Properties:Save() DRP.Properties:Flush() end
 	if DRP.Doors then DRP.Doors:SavePolicies() end
 	if DRP.WorldEntities then DRP.WorldEntities:Save() end
+	if DRP.Beds then DRP.Beds:Save(true) end
 	if DRP.Salvage then DRP.Salvage:Save(true) end
+	if DRP.Bonds then DRP.Bonds:Save(true) end
 	if DRP.Crafting then
 		for _, target in player.Iterator() do DRP.Crafting:SavePlayer(target) end
 		DRP.Crafting:SaveWorld()
@@ -87,6 +89,7 @@ function GM:PlayerInitialSpawn(ply)
 		DRP.Inventory.Load(ply, false)
 		ply.DRPRPNameValue = ply:Nick()
 		ply.DRPJobNameValue = ""
+		if DRP.Identity then DRP.Identity:Load(ply, nil, false) end
 		setState(ply, DRP.State.EPHEMERAL)
 		hook.Run("DRPPlayerReady", ply)
 		DRP.Net.SendProfile(ply)
@@ -138,16 +141,25 @@ function GM:PlayerInitialSpawn(ply)
 		ply.DRPJobNameValue = persistent and row and string.sub(string.Trim(tostring(row.job_name or "")), 1, 48) or ""
 		DRP.JobService.Set(ply, jobID or DRP.Job.CITIZEN, true)
 		DRP.Economy.InitializePlayer(ply, persistent and row and row.money or DRP.Economy.DefaultMoney)
-		setState(ply, persistent and DRP.State.PERSISTENT or DRP.State.EPHEMERAL)
-		hook.Run("DRPPlayerReady", ply)
-		-- Identity/economy are essential. Pocket contents are secondary and load
-		-- asynchronously, preventing a restart wave from holding every player.
-		DRP.Net.SendProfile(ply)
-		if DRP.Government then DRP.Government.Sync(ply) end
-		if DRP.Legal then DRP.Legal.PlayerReady(ply) end
-		DRP.Doors.SyncPlayer(ply)
-		ply:UnLock()
-		DRP.Inventory.Load(ply, persistent)
+		local function finishEssentialLoad()
+			if not IsValid(ply) then return end
+			setState(ply, persistent and DRP.State.PERSISTENT or DRP.State.EPHEMERAL)
+			if DRP.Identity then DRP.Identity:ApplyAppearance(ply) end
+			hook.Run("DRPPlayerReady", ply)
+			-- Identity/economy are essential. Hands contents remain secondary and
+			-- load asynchronously after dependent systems have a stable identity.
+			DRP.Net.SendProfile(ply)
+			if DRP.Government then DRP.Government.Sync(ply) end
+			if DRP.Legal then DRP.Legal.PlayerReady(ply) end
+			DRP.Doors.SyncPlayer(ply)
+			ply:UnLock()
+			DRP.Inventory.Load(ply, persistent)
+		end
+		if DRP.Identity then
+			DRP.Identity:Load(ply, row, persistent, finishEssentialLoad)
+		else
+			finishEssentialLoad()
+		end
 	end)
 end
 
@@ -177,6 +189,7 @@ function GM:PlayerDisconnected(ply)
 end
 
 function GM:PlayerSetModel(ply)
+	if DRP.Identity and DRP.Identity:ApplyAppearance(ply) then return end
 	local cached = DRP.JobService.GetCachedLoadout(ply:DRPJobID())
 	ply:SetModel(cached.model)
 end
@@ -224,15 +237,16 @@ concommand.Add("drp_status", function(ply)
 	end
 	local propService = DRP.Services.Get("props")
 	if propService then
-		local props, complexity = 0, 0
+		local props, complexity, cleanupCount = 0, 0, 0
 		for _, count in pairs(propService.CountByOwnerID) do props = props + count end
 		for _, weight in pairs(propService.WeightByOwnerID) do complexity = complexity + weight end
+		for _ in pairs(propService.CleanupRecords or {}) do cleanupCount = cleanupCount + 1 end
 		print(string.format("[DRP] tracked_props=%d/%d complexity=%d/%d", props, propService.MaxGlobalProps, complexity, propService.MaxGlobalPropWeight))
 		print(string.format("[DRP] dropped_entities weapons=%d/%d drugs=%d/%d crates=%d/%d cleanup_queue=%d",
 			propService.LimitedEntityCounts.weapon or 0, propService.LimitedEntityCaps.weapon,
 			propService.LimitedEntityCounts.drug or 0, propService.LimitedEntityCaps.drug,
 			propService.LimitedEntityCounts.crate or 0, propService.LimitedEntityCaps.crate,
-			math.max(0, propService.CleanupTail - propService.CleanupHead + 1)))
+			cleanupCount))
 	end
 	if DRP.Properties then
 		print(string.format("[DRP] properties definitions=%d active_leases=%d active_raids=%d pending_credits=%d", table.Count(DRP.Properties.Definitions), table.Count(DRP.Properties.Leases), table.Count(DRP.Properties.ActiveRaids), table.Count(DRP.Properties.PendingCredits)))

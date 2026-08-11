@@ -75,6 +75,10 @@ function Tests.Run()
 	check("mugging_mugger_death", scenarioOutcome("mugging", "mugger_killed", "victim", "instigator"))
 	check("arrest_booking", scenarioOutcome("legal_warrant", "suspect_arrested", "instigator", "victim"))
 	check("police_sighting_arrest", scenarioOutcome("police_weapon_sighting", "suspect_arrested", "instigator", "victim"))
+	check("police_npc_route_authority", DRP.PoliceNPCs == DRP.Services.Get("police_npcs")
+		and isfunction(DRP.PoliceNPCs.NearestRoute) and isfunction(DRP.PoliceNPCs.AssignNearestRoute)
+		and isfunction(DRP.PoliceNPCs.SetRouteNPCCount) and isfunction(DRP.PoliceNPCs.RenameRoute)
+		and isfunction(DRP.PoliceNPCs.PreviewRoute) and DRP.PoliceNPCs.TaseRange <= 100)
 	check("raid_attacker_victory", scenarioOutcome("property_raid", "attackers_victory", "instigator", "victim"))
 	check("raid_defender_victory", scenarioOutcome("property_raid", "defenders_victory", "victim", "instigator"))
 	check("treasury_raid_attacker_victory", scenarioOutcome("treasury_raid", "raiders_victory", "instigator", "victim"))
@@ -102,6 +106,19 @@ function Tests.Run()
 		and isfunction((hook.GetTable().CanTool or {})["DRP.Treasury.LockDuringRaid"])
 		and isfunction((hook.GetTable().CanProperty or {})["DRP.Treasury.LockDuringRaid"])
 		and isfunction((hook.GetTable().DRPAdminModeChanged or {})["DRP.Treasury.AdminMode"]))
+	local atmDefinition = DRP.JobEntityService.ByKey.municipal_atm
+	check("municipal_bond_math", DRP.Bonds:PayoutFor(1000) == 1050
+		and DRP.Bonds:DeficitFor(1000, 1050, 0) == 50
+		and DRP.Bonds:DeficitFor(2000, 1050, 25) == 25
+		and DRP.Bonds:BurnLimitFactor(0) == 1
+		and DRP.Bonds:BurnLimitFactor(DRP.Bonds.Config.BurnPauseRate) == 0)
+	check("municipal_atm_registration", istable(atmDefinition)
+		and atmDefinition.class == "drp_atm" and atmDefinition.ownerOnly == true
+		and scripted_ents.GetStored("drp_atm") ~= nil)
+	check("municipal_bonds_event_driven", timer.Exists("DRP.Bonds.Save") == false
+		and timer.Exists("DRP.Bonds.Maturity") == false
+		and table.HasValue(DRP.Bonds.Dependencies or {}, "government")
+		and table.HasValue(DRP.Bonds.Dependencies or {}, "economy_director"))
 	local sameParty = {}
 	local singleOutcome = DRP.Incidents.BuildOutcome({ type = "lockdown", instigator = sameParty, victim = sameParty }, "ended", "single-party scenario")
 	check("single_party_reward_deduplicated", #DRP.Incidents.OutcomeRewards(singleOutcome) == 1)
@@ -227,10 +244,22 @@ function Tests.Run()
 		and DRP.Salvage.Types.trashcan.sharedCooldown == 1800
 		and DRP.Salvage.Types.dumpster.personalCooldown == 1200
 		and DRP.Salvage.Types.dumpster.sharedCooldown == 2700
+		and math.abs(DRP.Salvage:SchematicChance("trashcan", 1, 1) - 0.19) < 0.000001
+		and math.abs(DRP.Salvage:SchematicChance("dumpster", 1, 1) - 0.25) < 0.000001
+		and math.abs(DRP.Salvage:SchematicChance("trashcan", 6, 1) - 0.001) < 0.000001
+		and math.abs(DRP.Salvage:SchematicChance("dumpster", 6, 1) - 0.0025) < 0.000001
+		and DRP.Salvage:SchematicChance("dumpster", 1, 64) > DRP.Salvage:SchematicChance("dumpster", 1, 1)
+		and DRP.Salvage:SchematicChance("dumpster", 1, 16) > DRP.Salvage:SchematicChance("dumpster", 2, 16)
+		and DRP.Salvage:RollSchematicGrade("dumpster", 1, 0.474) == 5
+		and DRP.Salvage:RollSchematicGrade("dumpster", 1, 0.476) == 6
+		and DRP.Salvage:RollSchematicGrade("dumpster", 1, 0.479) == nil
+		and DRP.Salvage.Types.trashcan.drugChance == 0.01
+		and DRP.Salvage.Types.dumpster.drugChance == 0.03
 		and DRP.Salvage:IsRareWeaponAllowed("weapon_rpg") == false
 		and DRP.Salvage:IsRecordAllowed({ kind = "weapon", class = "weapon_pistol" }) == false
 		and DRP.Salvage:IsRecordAllowed({ kind = "ammo", class = "drp_ammo_stack", ammo_type = "Pistol" }) == false
-		and DRP.Salvage:IsRecordAllowed({ kind = "drug", class = "drp_drug", drug = "weed" }) == false
+		and DRP.Salvage:IsRecordAllowed({ kind = "drug", class = "drp_drug", drug = "weed" }) == true
+		and DRP.Salvage:IsRecordAllowed({ kind = "drug", class = "drp_drug", drug = "unknown" }) == false
 		and DRP.Salvage:IsRecordAllowed({ kind = "entity", class = "zwf_jar" }) == true
 		and DRP.Salvage:IsRecordAllowed({ kind = "entity", class = "zmlab2_item_meth" }) == true
 		and (hook.GetTable().Think or {})["DRP.Salvage"] == nil)
@@ -256,8 +285,12 @@ function Tests.Run()
 		and isfunction(DRP.Objectives.CheckRoleGoal)
 		and isfunction(DRP.Objectives.EnsureBeginnerGuide) and isfunction(DRP.Objectives.SaveGuideProgress)
 		and DRP.ProtocolVersion >= 34
+		and DRP.Identity == DRP.Services.Get("identity")
+		and isfunction(DRP.Identity.IsRegistered) and isfunction(DRP.Identity.Register)
+		and DRP.IdentityCatalog.Model(1, 1, 1) == "models/player/Group01/male_01.mdl"
 		and istable(DRP.Objectives.Templates.welcome_identity)
 		and DRP.Objectives.Templates.welcome_identity.automatic == true
+		and DRP.Objectives.Templates.welcome_identity.event == "identity_registered"
 		and DRP.Objectives.Templates.beginner_property_purchase.event == "property_purchased"
 		and DRP.Objectives.Templates.welcome_pockets.automatic == true
 		and DRP.Objectives.Templates.beginner_mugging.event == "mugging_resolved"
@@ -274,6 +307,13 @@ function Tests.Run()
 		and isfunction((hook.GetTable().DRPPlayerHealed or {})["DRP.Objectives.HealingGuide"])
 		and isfunction((hook.GetTable().DRPPropertyOwnershipChanged or {})["DRP.Objectives.PropertyGuide"])
 		and isfunction((hook.GetTable().DRPMarketplaceFulfilled or {})["DRP.Objectives.Market"]))
+	local councilmanDefinition = DRP.JobEntityService and DRP.JobEntityService.ByKey and DRP.JobEntityService.ByKey.councilman
+	check("identity_registration_authority", DRP.Identity == DRP.Services.Get("identity")
+		and istable(councilmanDefinition) and councilmanDefinition.class == "drp_councilman"
+		and councilmanDefinition.ownerOnly == true and councilmanDefinition.countLimit == 1
+		and scripted_ents.GetStored("drp_councilman") ~= nil
+		and DRP.Net.ReceiverAudit["drp_identity_submit_v2"] ~= nil
+		and (hook.GetTable().Think or {})["DRP.Identity"] == nil)
 	local normalizedEvidence = DRP.Roles:Normalize({
 		hitEvidence = 99,
 		hitEvidenceVictims = { "76561198000000001", "76561198000000001", "invalid", "76561198000000002" }
@@ -325,6 +365,19 @@ function Tests.Run()
 		and DRP.DropPolicy.nonDroppableWeapons.weapon_drp_mayor_tablet == true
 		and DRP.PVP.IgnoredWeapons.weapon_drp_mayor_tablet == true
 		and isfunction(DRP.Phone.HasPoliceTerminal))
+	local policeTablet = weapons.GetStored("weapon_drp_police_tablet")
+	check("police_tablet_registration", istable(policeTablet)
+		and policeTablet.PrintName == "Police Operations Tablet"
+		and policeTablet.Base == "ephone"
+		and policeTablet.DRPTabletHardware == true
+		and policeTablet.DRPTabletInterface == "PoliceTablet"
+		and policeTablet.DRPPhoneDeviceContext == "police_tablet"
+		and istable(DRP.Jobs[DRP.Job.POLICE])
+		and DRP.Jobs[DRP.Job.POLICE].canUsePoliceOperationsTablet == true
+		and table.HasValue(DRP.Jobs[DRP.Job.POLICE].weapons or {}, "weapon_drp_police_tablet")
+		and DRP.JobService.IsUtilityWeapon("weapon_drp_police_tablet")
+		and DRP.DropPolicy.nonDroppableWeapons.weapon_drp_police_tablet == true
+		and DRP.PVP.IgnoredWeapons.weapon_drp_police_tablet == true)
 	local arcadeDefinition = DRP.JobEntityService.ByKey.arcade_cabinet
 	check("arcade_server_authority", DRP.Arcade == DRP.Services.Get("arcade")
 		and istable(arcadeDefinition) and arcadeDefinition.ownerOnly == true
@@ -370,7 +423,9 @@ function Tests.Run()
 	check("property_build_zone_authority", isfunction(DRP.Properties.AddBuildZone)
 		and isfunction(DRP.Properties.RemoveBuildZoneAt)
 		and isfunction(DRP.Properties.BuildPermissionAt)
+		and isfunction(DRP.Properties.ValidateSpawnPoint)
 		and isfunction(DRP.Properties.ValidateEntityPlacement)
+		and isfunction(DRP.Properties.ValidateSpawnedEntityPlacement)
 		and isfunction(DRP.Properties.BoundsInsideBuildZoneUnion)
 		and isfunction(DRP.Properties.OrientedBoundsInsideBuildZoneUnion)
 		and isfunction(DRP.Properties.EntityBoundsInsideBuildZoneUnion)
@@ -378,6 +433,24 @@ function Tests.Run()
 		and DRP.Doors and isfunction(DRP.Doors.JobMask)
 		and DRP.Properties.MaxBuildZones == 32
 		and DRP.Properties.BuildZoneTolerance == 1)
+	check("property_trespass_authority", istable(DRP.Incidents.Definitions.property_trespass)
+		and DRP.Incidents.Definitions.property_trespass.progression == false
+		and isfunction(DRP.Properties.BelongsToProperty)
+		and isfunction(DRP.Properties.TrespassPropertyAt)
+		and isfunction(DRP.Properties.UpdateTrespass)
+		and isfunction(DRP.Properties.RefreshTrespassProperty)
+		and isfunction(DRP.Properties.ClearTrespassProperty)
+		and isfunction((hook.GetTable().DRPPlayerActivity or {})["DRP.Properties.Trespass"])
+		and (hook.GetTable().Think or {})["DRP.Properties.Trespass"] == nil)
+	local bedDefinition = DRP.JobEntityService and DRP.JobEntityService.ByKey.base_bed
+	check("property_bed_spawn_and_travel_authority", DRP.Beds == DRP.Services.Get("beds")
+		and istable(bedDefinition) and bedDefinition.class == "drp_spawn_bed" and bedDefinition.public == true
+		and isfunction(DRP.Beds.RegisterEntity) and isfunction(DRP.Beds.SetHome)
+		and isfunction(DRP.Beds.CanFastTravel) and isfunction(DRP.Beds.TeleportHome)
+		and isfunction(DRP.Beds.Save) and isfunction(DRP.Beds.Status)
+		and isfunction((hook.GetTable().DRPPlayerReady or {})["DRP.Beds.PlayerReady"])
+		and isfunction((hook.GetTable().PlayerSpawn or {})["DRP.Beds.Respawn"])
+		and not isfunction((hook.GetTable().Think or {})["DRP.Beds.Poll"]))
 	local unionCheck = DRP.Properties and DRP.Properties.BoundsInsideBuildZoneUnion
 	local adjacentZones = {
 		{ mins = { x = 0, y = 0, z = 0 }, maxs = { x = 10, y = 10, z = 10 } },
@@ -751,14 +824,21 @@ function Tests.Run()
 	local craftingTransferActive = DRP.Crafting.CatalogTransfers[DRP.Crafting.CatalogTransferHead] ~= nil
 	local contractDeliveryActive = false
 	for _, delivery in pairs(DRP.Contracts.Deliveries) do if delivery.status == "in_progress" then contractDeliveryActive = true break end end
-	local propCleanupActive = DRP.Props.CleanupHead <= DRP.Props.CleanupTail
+	local propCleanupActive = next(DRP.Props.CleanupRecords or {}) ~= nil
 	local arcadeSessionActive = not table.IsEmpty(DRP.Arcade.Sessions)
 	check("idle_services_do_not_poll", (craftingTransferActive or timer.Exists("DRP.Crafting.CatalogBudget") == false)
 		and (contractDeliveryActive or timer.Exists("DRP.Contracts.Deliveries") == false)
 		and (propCleanupActive or timer.Exists("DRP.Props.EntityCleanup") == false)
 		and (arcadeSessionActive or timer.Exists("DRP.Arcade.Maintain") == false))
 	check("profile_outbox_authority", isfunction(DRP.Economy.WriteOutbox)
+		and isfunction(DRP.Economy.FlushQueuedOutbox)
+		and istable(DRP.Economy.PendingOutboxWrites)
 		and isfunction(DRP.Economy.RecoverPlayerRow) and isstring(DRP.Economy.OutboxDirectory))
+	check("deadline_prop_cleanup", istable(DRP.Props.CleanupRecords)
+		and isfunction(DRP.Props.CancelCleanup)
+		and timer.Exists("DRP.Props.EntityCleanup") == false)
+	check("catalog_and_snapshot_coalescing", isbool(DRP.Crafting.CatalogHasAttachments)
+		and isfunction(DRP.Contracts.SyncAllNow) and isbool(DRP.Contracts.SyncQueued))
 	check("disconnect_save_single_owner", not isfunction((hook.GetTable().PlayerDisconnected or {})["DRP.Inventory.Clear"])
 		and not isfunction((hook.GetTable().PlayerDisconnected or {})["DRP.Contracts.Disconnect"])
 		and isfunction(GAMEMODE.PlayerDisconnected))
@@ -766,12 +846,22 @@ function Tests.Run()
 	check("production_test_commands_locked", testToggle~=nil and isfunction(DRP.Tests.CanRunProductionTest))
 	check("service_dependencies_declared", table.HasValue(DRP.Inventory.Dependencies or {},"storage")
 		and table.HasValue(DRP.Crafting.Dependencies or {},"inventory")
-		and table.HasValue(DRP.EconomyDirector.Dependencies or {},"economy"))
+		and table.HasValue(DRP.EconomyDirector.Dependencies or {},"economy")
+		and table.HasValue(DRP.Beds.Dependencies or {},"properties")
+		and table.HasValue(DRP.Beds.Dependencies or {},"incidents"))
 	check("economy_commodity_namespace", DRP.Commodities.Key({kind="resource",resource="ferrous_scrap"})=="resource:ferrous_scrap"
 		and istable(DRP.Commodities.Definition("resource:ferrous_scrap")))
 	check("economy_projection_hotpath", isfunction(DRP.EconomyDirector.MoneySummary)
 		and isfunction(DRP.EconomyDirector.QueueJournal)
 		and isfunction(DRP.EconomyDirector.FlushJournal)
+		and isfunction(DRP.EconomyDirector.RecordBurn)
+		and isfunction(DRP.EconomyDirector.EconomicPressure)
+		and isfunction(DRP.EconomyDirector.TransactionBurnRate)
+		and isfunction(DRP.EconomyDirector.CalculateTransactionBurn)
+		and isfunction(DRP.Economy.SettleTransfer)
+		and isfunction(DRP.Economy.Transfer)
+		and select(1,DRP.EconomyDirector:CalculateTransactionBurn(1000,0.075))==75
+		and select(2,DRP.EconomyDirector:CalculateTransactionBurn(1000,0.075))==925
 		and DRP.EconomyDirector.JournalBatchSize >= 16
 		and DRP.EconomyDirector.MoneyQuoteCacheSeconds <= 5)
 

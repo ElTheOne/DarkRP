@@ -39,7 +39,7 @@ function Hits.Create(requester, target, amount)
 	if not IsValid(target) or target == requester or amount < 100 or amount > 50000 then DRP.Net.Notify(requester, "Usage: /hit <player> <100-50000>.", 3) return false end
 	if Hits.ActiveByTarget[target] then DRP.Net.Notify(requester, "That player already has an active contract.", 3) return false end
 	for _, record in pairs(Hits.Open) do if record.target == target then DRP.Net.Notify(requester, "That player already has an open contract.", 3) return false end end
-	if not DRP.Economy.Take(requester, amount, "hit contract escrow") then return false end
+	if not DRP.Economy.Take(requester, amount, "hit contract escrow", { kind = "custody", source = "hit contract escrow" }) then return false end
 	local id = Hits.NextID
 	Hits.NextID = id + 1
 	Hits.Open[id] = { id = id, requesterID = requester:SteamID64(), requesterName = requester:DRPName(), target = target, targetID = target:SteamID64(), amount = amount, expires = CurTime() + 180 }
@@ -74,6 +74,30 @@ function Hits.Accept(hitman, id)
 	return true
 end
 
+function Hits.StartGenerated(hitman, target, objectiveKey)
+	if not IsValid(hitman) or not IsValid(target) or hitman == target then return nil, "Invalid contract participants." end
+	if Hits.ActiveByHitman[hitman] or Hits.ActiveByTarget[target] then return nil, "One participant already has an active hit." end
+	local id = Hits.NextID
+	Hits.NextID = id + 1
+	local record = {
+		id = id, generated = true, requesterID = "SERVER", requesterName = "Server",
+		target = target, targetID = target:SteamID64(), amount = 0,
+		hitman = hitman, deadline = CurTime() + 300, objectiveKey = objectiveKey
+	}
+	record.incident = DRP.Incidents.Create("hit_contract", {
+		reason = "An anonymous contract has been accepted against you",
+		instigator = hitman, victim = target, deadline = record.deadline,
+		participants = { hitman = hitman, target = target }, teamShare = false,
+		metadata = { contract_id = id, generated = true, conceal_from_role = "target", conceal_role = "hitman" }
+	})
+	if not record.incident then return nil, "Incident authority rejected the generated contract." end
+	record.incident.suppressProgression = true
+	DRP.Incidents.Grant(record.incident, DRP.IncidentAction.DAMAGE, hitman, target, "Server-issued hit contract", record.deadline)
+	Hits.ActiveByHitman[hitman], Hits.ActiveByTarget[target] = record, record
+	DRP.Net.Notify(target, "An anonymous hit contract is active against you. The contractor will be revealed only if they attack.", 2)
+	return record
+end
+
 function Hits.Finish(record, success, reason)
 	if not record or record.finished then return false end
 	record.finished = true
@@ -81,13 +105,16 @@ function Hits.Finish(record, success, reason)
 	DRP.Deadlines.Cancel("hit:open:" .. record.id)
 	if IsValid(record.hitman) then Hits.ActiveByHitman[record.hitman] = nil end
 	if IsValid(record.target) then Hits.ActiveByTarget[record.target] = nil end
-	if success and IsValid(record.hitman) then
-		DRP.Economy.Add(record.hitman, record.amount, "completed hit contract #" .. record.id)
+	if record.generated then
+		-- Generated objectives are rewarded by DRP.Objectives; no escrow exists.
+	elseif success and IsValid(record.hitman) then
+		DRP.Economy.SettleTransfer(record.hitman, record.amount, "completed hit contract #" .. record.id)
 		DRP.Net.Notify(record.hitman, "Hit completed. Escrow released.", 1)
 	else
 		refund(record, reason or "contract failed")
 	end
 	if record.incident and DRP.Incidents.Get(record.incident.id) then DRP.Incidents.Resolve(record.incident, success and "target_eliminated" or "contract_failed", reason or "Contract resolved") end
+	if DRP.SocialObjectives and DRP.SocialObjectives.HitFinished then DRP.SocialObjectives:HitFinished(record, success, reason) end
 	if DRP.Audit then DRP.Audit.Log(record.hitman, success and "hit_completed" or "hit_failed", record.target, "#" .. record.id .. " " .. tostring(reason)) end
 	return true
 end
@@ -113,6 +140,13 @@ hook.Add("EntityTakeDamage", "DRP.Hits.LethalDamage", function(victim, damage)
 	local record = Hits.ActiveByTarget[victim]
 	if not record then return end
 	local attacker = damage:GetAttacker()
+	if attacker == record.hitman and record.incident and DRP.Incidents.Get(record.incident.id)
+		and record.incident.metadata.conceal_from_role then
+		record.incident.metadata.conceal_from_role = nil
+		record.incident.metadata.conceal_role = nil
+		DRP.Incidents.AddEvidence(record.incident, "contractor_revealed", attacker, victim, "The contractor attacked and revealed their identity", true)
+		DRP.Incidents.Sync(record.incident, victim)
+	end
 	if attacker == record.hitman and damage:GetDamage() >= victim:Health() then Hits.Finish(record, true, "target eliminated") end
 end)
 

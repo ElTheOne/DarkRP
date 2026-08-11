@@ -18,8 +18,27 @@ DRP.Salvage = Salvage
 DRP.Services.Register("salvage", Salvage)
 
 Salvage.Types = {
-	trashcan = { class = "drp_salvage_trashcan", personalMin = 1, personalMax = 3, personalCooldown = 600, sharedCooldown = 1800, rareChance = 0.04 },
-	dumpster = { class = "drp_salvage_dumpster", personalMin = 3, personalMax = 6, personalCooldown = 1200, sharedCooldown = 2700, rareChance = 0.10 }
+	trashcan = { class = "drp_salvage_trashcan", personalMin = 1, personalMax = 3, personalCooldown = 600, sharedCooldown = 1800, rareChance = 0.04, drugChance = 0.01, maxSchematicGrade = 6 },
+	dumpster = { class = "drp_salvage_dumpster", personalMin = 3, personalMax = 6, personalCooldown = 1200, sharedCooldown = 2700, rareChance = 0.10, drugChance = 0.03, maxSchematicGrade = 6 }
+}
+
+-- One mutually exclusive schematic tier is rolled whenever an exhausted global
+-- pool becomes eligible to refresh. These are explicit base probabilities,
+-- ordered Grade I through Grade V and then Ordnance. They deliberately make
+-- early progression broadly accessible while reserving the highest tiers for
+-- players who consistently revisit shared bins over many sessions.
+Salvage.SchematicChances = {
+	trashcan = { 0.19, 0.10, 0.04, 0.01, 0.002, 0.001 },
+	dumpster = { 0.25, 0.14, 0.06, 0.02, 0.005, 0.0025 }
+}
+
+Salvage.DrugLoot = {
+	heroin = { label = "Heroin", model = "models/props_junk/garbage_bag001a.mdl" },
+	speed = { label = "Speed", model = "models/props_lab/jar01a.mdl" },
+	weed = { label = "Weed", model = "models/props_lab/box01a.mdl" },
+	pcp = { label = "PCP", model = "models/props_junk/garbage_metalcan001a.mdl" },
+	crack = { label = "Crack", model = "models/props_lab/jar01b.mdl" },
+	fentanyl = { label = "Fentanyl", model = "models/props_junk/garbage_plasticbottle003a.mdl" }
 }
 
 Salvage.RareWeapons = {
@@ -103,23 +122,21 @@ local function ammoRecord(binID)
 	}, binID)
 end
 
-local function zeroProductRecord(binID)
-	if math.random(1, 2) == 1 and scripted_ents.GetStored("zwf_jar") then
-		return cleanItem({ kind = "entity", class = "zwf_jar", label = "GrowOP Weed Jar", model = "models/zerochain/props_weedfarm/zwf_jar.mdl" }, binID)
-	end
-	if scripted_ents.GetStored("zmlab2_item_meth") then
-		return cleanItem({ kind = "entity", class = "zmlab2_item_meth", label = "MethLab Meth Bag", model = "models/zerochain/props_methlab/zmlab2_bag.mdl" }, binID)
-	end
-	if scripted_ents.GetStored("zwf_jar") then
-		return cleanItem({ kind = "entity", class = "zwf_jar", label = "GrowOP Weed Jar", model = "models/zerochain/props_weedfarm/zwf_jar.mdl" }, binID)
-	end
+local function drugRecord(binID)
+	local keys = {}
+	for key in pairs(Salvage.DrugLoot) do keys[#keys + 1] = key end
+	table.sort(keys)
+	local key = table.Random(keys)
+	local definition = key and Salvage.DrugLoot[key]
+	if not definition then return nil end
+	return cleanItem({ kind = "drug", class = "drp_drug", drug = key, label = definition.label, model = definition.model, amount = 1 }, binID)
 end
 
 local function salvageRecordAllowed(record)
 	if not istable(record) then return false end
 	if record.kind == "weapon" then return validWeapon(record.class) end
 	if record.kind == "ammo" then return validWeapon(record.arc9_source) and arc9AmmoType(record.arc9_source) == tostring(record.ammo_type or "") end
-	if record.class == "drp_drug" then return false end
+	if record.class == "drp_drug" then return record.kind == "drug" and Salvage.DrugLoot[tostring(record.drug or "")] ~= nil end
 	return true
 end
 
@@ -168,7 +185,7 @@ local function boostedRecord(ply, record)
 	return record
 end
 
-local function commonRecord(binID, ply)
+local function commonRecord(binID, ply, kind)
 	if DRP.Crafting and DRP.Crafting.GeneratePersonalLoot then
 		local generated=DRP.Crafting:GeneratePersonalLoot(ply)
 		if generated then return boostedRecord(ply,cleanItem(generated,binID)) end
@@ -178,7 +195,7 @@ local function commonRecord(binID, ply)
 			{ "petroleum", "Petroleum", "models/props_junk/gascan001a.mdl" }
 		}
 		local choice=table.Random(resources)
-		return boostedRecord(ply, zeroProductRecord(binID) or cleanItem({kind="resource",class="drp_cocaine_item",resource=choice[1],label=choice[2],model=choice[3],amount=1},binID))
+		return boostedRecord(ply, cleanItem({kind="resource",class="drp_cocaine_item",resource=choice[1],label=choice[2],model=choice[3],amount=1},binID))
 	end
 	local roll = math.random(1, 100)
 	if roll <= 55 then
@@ -194,12 +211,50 @@ local function commonRecord(binID, ply)
 		local choice = table.Random(resources)
 		return boostedRecord(ply, cleanItem({ kind = "resource", class = "drp_cocaine_item", resource = choice[1], label = choice[2], model = choice[3], amount = 1 }, binID))
 	end
-	return boostedRecord(ply, zeroProductRecord(binID) or cleanItem({ kind = "resource", class = "drp_cocaine_item", resource = "salvage_scrap", label = "Salvage Scrap", model = "models/gibs/metal_gib4.mdl", amount = 1 }, binID))
+	return boostedRecord(ply, cleanItem({ kind = "resource", class = "drp_cocaine_item", resource = "salvage_scrap", label = "Salvage Scrap", model = "models/gibs/metal_gib4.mdl", amount = 1 }, binID))
 end
 
-local function rareRecord(binID, ply, kind)
+function Salvage:PopulationCount()
+	if DRP.Players and istable(DRP.Players.List) then
+		local humans = 0
+		for _, candidate in ipairs(DRP.Players.List) do
+			if IsValid(candidate) and not candidate:IsBot() then humans = humans + 1 end
+		end
+		return math.max(1, humans)
+	end
+	return math.max(1, #player.GetHumans())
+end
+
+function Salvage:SchematicPopulationFactor(population)
+	population = math.max(1, math.floor(tonumber(population) or self:PopulationCount()))
+	-- Add one percent of the base chance per additional player, capped at a
+	-- 50% increase. More players share the same rare pool, so this offsets
+	-- contention without allowing a populated server to flood schematics.
+	return math.Clamp(1 + ((population - 1) * 0.01), 1, 1.50)
+end
+
+function Salvage:SchematicChance(kind, grade, population)
+	local definition = self.Types[tostring(kind or "")]
+	grade = math.Clamp(math.floor(tonumber(grade) or 1), 1, 6)
+	if not definition or grade > definition.maxSchematicGrade then return 0 end
+	local chances = self.SchematicChances[tostring(kind or "")]
+	return math.Clamp((istable(chances) and tonumber(chances[grade]) or 0) * self:SchematicPopulationFactor(population), 0, 1)
+end
+
+function Salvage:RollSchematicGrade(kind, population, randomValue)
+	local definition = self.Types[tostring(kind or "")]
+	if not definition then return nil end
+	local needle, cumulative = tonumber(randomValue) or math.random(), 0
+	for grade = 1, definition.maxSchematicGrade do
+		cumulative = cumulative + self:SchematicChance(kind, grade, population)
+		if needle <= cumulative then return grade end
+	end
+	return nil
+end
+
+local function rareRecord(binID, ply, kind, excludeSchematics)
 	if DRP.Crafting and DRP.Crafting.GenerateRareLoot then
-		local generated=DRP.Crafting:GenerateRareLoot(ply,kind)
+		local generated=DRP.Crafting:GenerateRareLoot(ply,kind,excludeSchematics)
 		if generated then return boostedRecord(ply,cleanItem(generated,binID)) end
 	end
 	if math.random() <= 0.25 then
@@ -282,7 +337,13 @@ function Salvage:RefreshIfDue(ply, entity)
 	if #personal.items == 0 and now >= math.floor(tonumber(personal.next_refresh) or 0) then
 		local rolls = math.random(definition.personalMin, definition.personalMax)
 		rolls = DRP.Supporter and DRP.Supporter.ApplyRollCount(ply, rolls) or rolls
-		for _ = 1, rolls do personal.items[#personal.items + 1] = commonRecord(entity.DRPSalvageID, ply) end
+		-- Drug chance is per container refresh, not per generated item. This keeps
+		-- the advertised 1%/3% rates exact even when a dumpster rolls six items.
+		if math.random() <= definition.drugChance then
+			personal.items[#personal.items + 1] = boostedRecord(ply, drugRecord(entity.DRPSalvageID))
+			rolls = math.max(0, rolls - 1)
+		end
+		for _ = 1, rolls do personal.items[#personal.items + 1] = commonRecord(entity.DRPSalvageID, ply, record.kind) end
 		personal.next_refresh = 0
 		markDirty(record)
 	end
@@ -290,10 +351,17 @@ function Salvage:RefreshIfDue(ply, entity)
 	record.shared.items = istable(record.shared.items) and record.shared.items or {}
 	if purgeDisallowed(record.shared.items) then markDirty(record) end
 	if #record.shared.items == 0 and now >= math.floor(tonumber(record.shared.next_refresh) or 0) then
-		local rareChance = definition.rareChance
-		if math.random() <= rareChance then
+		local schematicGrade = self:RollSchematicGrade(record.kind, self:PopulationCount())
+		if schematicGrade and DRP.Crafting and DRP.Crafting.GenerateSchematicLoot then
+			local schematicRolls = DRP.Supporter and DRP.Supporter.ApplyRollCount(ply, 1) or 1
+			for _ = 1, schematicRolls do
+				local schematic = DRP.Crafting:GenerateSchematicLoot(schematicGrade)
+				if schematic then record.shared.items[#record.shared.items + 1] = cleanItem(schematic, entity.DRPSalvageID) end
+			end
+		end
+		if #record.shared.items == 0 and math.random() <= definition.rareChance then
 			local rareRolls = DRP.Supporter and DRP.Supporter.ApplyRollCount(ply, 1) or 1
-			for _ = 1, rareRolls do record.shared.items[#record.shared.items + 1] = rareRecord(entity.DRPSalvageID, ply, record.kind) end
+			for _ = 1, rareRolls do record.shared.items[#record.shared.items + 1] = rareRecord(entity.DRPSalvageID, ply, record.kind, true) end
 		end
 		record.shared.next_refresh = #record.shared.items == 0 and (now + definition.sharedCooldown) or 0
 		markDirty(record)
@@ -437,7 +505,15 @@ function Salvage:Save(database)
 end
 
 function Salvage:Status()
-	return { containers = table.Count(self.ByID), records = table.Count(self.State.bins or {}), dirty = self.Dirty == true, database_dirty = self.DatabaseDirty == true, revision = self.State.revision or 0 }
+	local population = self:PopulationCount()
+	return {
+		containers = table.Count(self.ByID), records = table.Count(self.State.bins or {}), dirty = self.Dirty == true,
+		database_dirty = self.DatabaseDirty == true, revision = self.State.revision or 0, population = population,
+		trashcan_grade1_chance = self:SchematicChance("trashcan", 1, population),
+		dumpster_grade1_chance = self:SchematicChance("dumpster", 1, population),
+		trashcan_schematic_chances = table.Copy(self.SchematicChances.trashcan),
+		dumpster_schematic_chances = table.Copy(self.SchematicChances.dumpster)
+	}
 end
 
 local function decodeState(payload)

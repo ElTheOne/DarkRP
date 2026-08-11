@@ -1,5 +1,14 @@
 DRP.CraftingUI = DRP.CraftingUI or { CatalogCache = {}, Fingerprint = "", CatalogRequestPending = false }
 local UI = DRP.CraftingUI
+UI.ViewState = UI.ViewState or {}
+UI.ViewState.activeTab = tonumber(UI.ViewState.activeTab) or 1
+UI.ViewState.lists = UI.ViewState.lists or {}
+UI.ViewState.tree = UI.ViewState.tree or {}
+if UI.ViewState.tree.search==nil then UI.ViewState.tree.search="" end
+if UI.ViewState.tree.zoom==nil then UI.ViewState.tree.zoom=.78 end
+if UI.ViewState.tree.offsetX==nil then UI.ViewState.tree.offsetX=0 end
+if UI.ViewState.tree.offsetY==nil then UI.ViewState.tree.offsetY=0 end
+if UI.ViewState.tree.showAttachments==nil then UI.ViewState.tree.showAttachments=true end
 local openMessage, actionMessage, deltaMessage, cacheMessage, catalogChunkMessage, objectiveMessage = "drp_crafting_open_v1", "drp_crafting_action_v1", "drp_crafting_delta_v1", "drp_crafting_catalog_ready_v1", "drp_crafting_catalog_chunk_v1", "drp_crafting_objective_v1"
 local frame, handsFrame
 local cachePath="darkrp/crafting_catalog.json"
@@ -13,8 +22,10 @@ end
 local function send(action,entity,writer)
 	if not IsValid(entity) then return end net.Start(actionMessage) net.WriteUInt(DRP.ProtocolVersion,8) net.WriteString(action) net.WriteUInt(entity:EntIndex(),16) if writer then writer() end net.SendToServer()
 end
-local function close()
-	if IsValid(frame) then frame:Close() end if IsValid(handsFrame) then handsFrame:Close() end frame,handsFrame=nil,nil
+local function close(immediate)
+	if IsValid(frame) then if immediate then frame:Remove() else frame:Close() end end
+	if IsValid(handsFrame) then if immediate then handsFrame:Remove() else handsFrame:Close() end end
+	frame,handsFrame=nil,nil
 	-- Allow a later table interaction to retry catalogue recovery.
 	if #(UI.CatalogCache or {})==0 then UI.CatalogRequestPending=false end
 end
@@ -70,8 +81,12 @@ local function styleEntry(entry,colour)
 	end
 end
 
-function UI.Open(snapshot)
-	close()
+function UI.Open(snapshot, refreshing)
+	-- Table mutations send a fresh authoritative snapshot. Replace the existing
+	-- controls immediately while retaining navigation state so repeated crafts do
+	-- not fade, change tabs or throw the player back to the top of the tree.
+	refreshing = refreshing or IsValid(frame)
+	close(refreshing)
 	if istable(snapshot.catalog) and #snapshot.catalog>0 then
 		UI.CatalogCache=snapshot.catalog UI.Fingerprint=snapshot.catalog_fingerprint UI.CatalogRequestPending=false
 		file.CreateDir("darkrp") file.Write(cachePath,util.TableToJSON({fingerprint=UI.Fingerprint,catalog=UI.CatalogCache},false))
@@ -91,21 +106,33 @@ function UI.Open(snapshot)
 	-- in an invisible interaction.
 	local colour=accent() local leftWidth=math.max(900,ScrW()-40) local height=math.max(700,ScrH()-40)
 	local recipeByID={} for _,recipe in ipairs(snapshot.catalog or {}) do recipeByID[recipe.id]=recipe end
-	frame=DRP.UI.Frame("GUNSMITHING",leftWidth,height) frame:SetPos(20,20) if DRP.InventoryUI and DRP.InventoryUI.InstallFade then DRP.InventoryUI.InstallFade(frame,true) end
+	frame=DRP.UI.Frame("GUNSMITHING",leftWidth,height) frame:SetPos(20,20)
+	if not refreshing and DRP.InventoryUI and DRP.InventoryUI.InstallFade then DRP.InventoryUI.InstallFade(frame,true) end
 	frame.Think=function(self) local entity=Entity(snapshot.entity) if not IsValid(entity) or not LocalPlayer():Alive() or LocalPlayer():GetPos():DistToSqr(entity:GetPos())>220^2 then close() end end
 	frame.Paint=function(_,w,h) draw.RoundedBox(12,0,0,w,h,Color(5,10,19,249)) draw.RoundedBoxEx(12,0,0,w,62,Color(13,23,39,252),true,true,false,false) draw.RoundedBox(8,0,0,5,h,colour) draw.SimpleText("GUNSMITHING","DRP.Admin.Title",22,28,color_white,TEXT_ALIGN_LEFT,TEXT_ALIGN_CENTER) draw.SimpleText("MASTERY "..snapshot.level.." / 50","DRP.Admin.Small",w-28,28,colour,TEXT_ALIGN_RIGHT,TEXT_ALIGN_CENTER) end
 	local xp=vgui.Create("DPanel",frame) xp:SetPos(22,68) xp:SetSize(frame:GetWide()-44,38) xp.Paint=function(_,w,h) draw.RoundedBox(7,0,8,w,18,Color(15,25,42)) draw.RoundedBox(7,0,8,w*math.Clamp(snapshot.xp/math.max(snapshot.xp_next,1),0,1),18,colour) draw.SimpleText(snapshot.xp.." / "..snapshot.xp_next.." XP","DRP.Admin.Small",w/2,17,color_white,TEXT_ALIGN_CENTER,TEXT_ALIGN_CENTER) end
 	local tabs=vgui.Create("DPropertySheet",frame) tabs:SetPos(18,112) tabs:SetSize(frame:GetWide()-36,frame:GetTall()-130)
+	tabs.OnActiveTabChanged=function(self,_,newTab)
+		if not IsValid(newTab) then return end
+		for index,item in ipairs(self.Items or {}) do if item.Tab==newTab then UI.ViewState.activeTab=index break end end
+	end
 	local function pageList(title,filter)
+		local listState=UI.ViewState.lists[title] or {search="",grade=0,scroll=0}
+		UI.ViewState.lists[title]=listState
 		local panel=vgui.Create("DPanel",tabs) panel.Paint=function(_,w,h) draw.RoundedBox(8,0,0,w,h,Color(8,15,27,245)) end
 		local search=vgui.Create("DTextEntry",panel) search:Dock(TOP) search:SetTall(34) search:SetPlaceholderText("Search technology and recipes...")
 		styleEntry(search,colour)
+		search:SetValue(tostring(listState.search or ""))
 		local gradeBox=vgui.Create("DComboBox",panel) gradeBox:Dock(TOP) gradeBox:SetTall(30) gradeBox:SetSortItems(false) gradeBox:SetValue("ALL GRADES")
 		gradeBox:AddChoice("ALL GRADES",0)
 		for grade=1,6 do gradeBox:AddChoice(string.upper(DRP.CraftingShared.GradeNames[grade] or ("GRADE "..grade)),grade) end
+		gradeBox:ChooseOptionID(math.Clamp(math.floor(tonumber(listState.grade) or 0)+1,1,7))
 		gradeBox:SetTextColor(Color(215,230,242)) gradeBox.Paint=function(self,w,h) draw.RoundedBox(6,0,0,w,h,Color(10,24,40,245)) draw.RoundedBoxEx(6,0,h-2,w,2,colour,false,false,true,true) self:DrawTextEntryText(self:GetTextColor(),colour,self:GetTextColor()) end
 		local list=vgui.Create("DScrollPanel",panel) list:Dock(FILL)
+		local restoringScroll=true
+		list.Think=function(self) if not restoringScroll and IsValid(self:GetVBar()) then listState.scroll=self:GetVBar():GetScroll() end end
 		local function rebuild()
+			local wantedScroll=tonumber(listState.scroll) or 0
 			list:Clear() local wanted=string.lower(search:GetValue() or "")
 			local _,selectedGrade=gradeBox:GetSelected()
 			for _,r in ipairs(snapshot.catalog or {}) do if filter(r) and (not selectedGrade or selectedGrade==0 or tonumber(r.grade)==tonumber(selectedGrade)) and (wanted=="" or string.find(string.lower(r.name.." "..r.category),wanted,1,true)) then
@@ -117,23 +144,47 @@ function UI.Open(snapshot)
 				row.DoClick=function() if ok then send("start",Entity(snapshot.entity),function() net.WriteString(r.id) net.WriteUInt(1,8) end) else surface.PlaySound("buttons/button10.wav") end end
 				row.DoRightClick=function() send("track",Entity(snapshot.entity),function() net.WriteString(r.id) end) end
 			end end
+			restoringScroll=true
+			timer.Simple(0,function()
+				if not IsValid(list) or not IsValid(list:GetVBar()) then return end
+				list:GetVBar():SetScroll(wantedScroll)
+				timer.Simple(0,function() if IsValid(list) then restoringScroll=false end end)
+			end)
 		end
-		search.OnValueChange=rebuild gradeBox.OnSelect=function() rebuild() end rebuild() tabs:AddSheet(title,panel,nil) return panel
+		search.OnValueChange=function(self) listState.search=self:GetValue() or "" listState.scroll=0 rebuild() end
+		gradeBox.OnSelect=function(_,_,_,data) listState.grade=tonumber(data) or 0 listState.scroll=0 rebuild() end
+		rebuild() tabs:AddSheet(title,panel,nil) return panel
 	end
 	local function technologyTree()
+		local treeState=UI.ViewState.tree
+		-- Dependency edges inherit the grade of the item they originate from. The
+		-- same palette is used by the grade headings so the graph has a visible key.
+		local gradeColours={
+			Color(88,220,132),  -- Grade I
+			Color(66,205,238),  -- Grade II
+			Color(78,132,255),  -- Grade III
+			Color(174,104,255), -- Grade IV
+			Color(244,190,72),  -- Grade V
+			Color(255,92,82)    -- Ordnance
+		}
 		local panel=vgui.Create("DPanel",tabs) panel.Paint=function(_,w,h) draw.RoundedBox(8,0,0,w,h,Color(8,15,27,245)) end
 		local toolbar=vgui.Create("DPanel",panel) toolbar:Dock(TOP) toolbar:SetTall(42) toolbar.Paint=nil
 		local search=vgui.Create("DTextEntry",toolbar) search:Dock(LEFT) search:SetWide(310) search:DockMargin(6,4,8,4) search:SetPlaceholderText("Filter dependency tree...")
 		styleEntry(search,colour)
+		search:SetValue(tostring(treeState.search or ""))
+		local attachmentToggle=vgui.Create("DCheckBoxLabel",toolbar)
+		attachmentToggle:Dock(RIGHT) attachmentToggle:SetWide(190) attachmentToggle:DockMargin(12,7,8,5)
+		attachmentToggle:SetText("SHOW ATTACHMENTS") attachmentToggle:SetFont("DRP.Admin.Small") attachmentToggle:SetTextColor(Color(205,220,235))
+		attachmentToggle:SetChecked(treeState.showAttachments~=false)
 		local zoomLabel=vgui.Create("DLabel",toolbar) zoomLabel:Dock(LEFT) zoomLabel:SetWide(62) zoomLabel:SetText("ZOOM") zoomLabel:SetFont("DRP.Admin.Small") zoomLabel:SetTextColor(Color(170,180,194))
-		local zoom=vgui.Create("DNumSlider",toolbar) zoom:Dock(FILL) zoom:SetMin(.55) zoom:SetMax(1.15) zoom:SetDecimals(2) zoom:SetValue(.72)
+		local zoom=vgui.Create("DNumSlider",toolbar) zoom:Dock(FILL) zoom:SetMin(.55) zoom:SetMax(1.15) zoom:SetDecimals(2) zoom:SetValue(tonumber(treeState.zoom) or .78)
 		local viewport=vgui.Create("DPanel",panel) viewport:Dock(FILL) viewport:SetMouseInputEnabled(true) viewport.Paint=function(_,w,h) surface.SetDrawColor(5,10,18,180) surface.DrawRect(0,0,w,h) end
-		local canvas=vgui.Create("DPanel",viewport) local offsetX,offsetY,dragX,dragY=0,0
-		local focusedID
+		local canvas=vgui.Create("DPanel",viewport) local offsetX,offsetY,dragX,dragY=tonumber(treeState.offsetX) or 0,tonumber(treeState.offsetY) or 0
+		local focusedID=treeState.focusedID
 		local rebuild
-		canvas.OnMousePressed=function(_,code) if code==MOUSE_RIGHT then focusedID=nil timer.Simple(0,rebuild) end end
+		canvas.OnMousePressed=function(_,code) if code==MOUSE_RIGHT then focusedID=nil treeState.focusedID=nil timer.Simple(0,rebuild) end end
 		viewport.OnMousePressed=function(_,code)
-			if code==MOUSE_RIGHT then focusedID=nil timer.Simple(0,rebuild) return end
+			if code==MOUSE_RIGHT then focusedID=nil treeState.focusedID=nil timer.Simple(0,rebuild) return end
 			if code==MOUSE_LEFT or code==MOUSE_MIDDLE then local mx,my=gui.MousePos() dragX,dragY=mx-offsetX,my-offsetY viewport:MouseCapture(true) end
 		end
 		viewport.OnMouseReleased=function() dragX,dragY=nil,nil viewport:MouseCapture(false) end
@@ -150,12 +201,17 @@ function UI.Open(snapshot)
 		viewport.Think=function()
 			if dragX and input.IsMouseDown(MOUSE_LEFT) or dragX and input.IsMouseDown(MOUSE_MIDDLE) then local mx,my=gui.MousePos() offsetX,offsetY=mx-dragX,my-dragY elseif dragX then dragX,dragY=nil,nil viewport:MouseCapture(false) end
 			offsetX=math.Clamp(offsetX,math.min(0,viewport:GetWide()-canvas:GetWide()),0) offsetY=math.Clamp(offsetY,math.min(0,viewport:GetTall()-canvas:GetTall()),0) canvas:SetPos(offsetX,offsetY)
+			treeState.offsetX,treeState.offsetY=offsetX,offsetY
 		end
 		local nodes,byOutput={},{}
 		for _,recipe in ipairs(snapshot.catalog or {}) do if recipe.id and string.StartWith(recipe.id,"component:") then byOutput[string.sub(recipe.id,11)]=recipe.id end end
 		rebuild=function()
 			for _,node in pairs(nodes) do if IsValid(node.button) then node.button:Remove() end end nodes={}
 			local scale=zoom:GetValue() local wanted=string.lower(search:GetValue() or "") local rows={}
+			local showAttachments=attachmentToggle:GetChecked()
+			if not showAttachments and focusedID then
+				for _,candidate in ipairs(snapshot.catalog or {}) do if candidate.id==focusedID and candidate.kind=="attachment" then focusedID=nil treeState.focusedID=nil break end end
+			end
 			for grade=1,6 do rows[grade]=0 end
 			local related={}
 			if focusedID then
@@ -175,10 +231,11 @@ function UI.Open(snapshot)
 				for ingredient in pairs(candidate.ingredients or {}) do if ingredient==focusedOutput then related[candidate.id]=true break end end
 			end
 		end
+			local gradeSpacing,rowSpacing,nodeWidth,nodeHeight=500,150,380,104
 			for _,recipe in ipairs(snapshot.catalog or {}) do
-				if (not focusedID or related[recipe.id]) and (wanted=="" or string.find(string.lower(recipe.name.." "..tostring(recipe.category or "")),wanted,1,true)) then
+				if (showAttachments or recipe.kind~="attachment") and (not focusedID or related[recipe.id]) and (wanted=="" or string.find(string.lower(recipe.name.." "..tostring(recipe.category or "")),wanted,1,true)) then
 					local grade=math.Clamp(tonumber(recipe.grade) or 1,1,6) rows[grade]=rows[grade]+1
-					local x=(grade-1)*380*scale+24 local y=(rows[grade]-1)*112*scale+56 local w,h=340*scale,92*scale
+					local x=(grade-1)*gradeSpacing*scale+32 local y=(rows[grade]-1)*rowSpacing*scale+64 local w,h=nodeWidth*scale,nodeHeight*scale
 					local button=vgui.Create("DButton",canvas) button:SetPos(x,y) button:SetSize(w,h) button:SetText("")
 					local ok,state=recipeUnlocked(snapshot,recipe)
 					button.Paint=function(self,bw,bh)
@@ -195,22 +252,32 @@ function UI.Open(snapshot)
 				local compatibilityTooltip=recipe.kind=="attachment" and ("\nCompatible weapons: "..(#(recipe.compatible_weapons or {})>0 and table.concat(recipe.compatible_weapons,", ") or "None detected")) or ""
 				button:SetTooltip(ingredientsText(recipe).."\n"..math.ceil(recipe.time).." seconds  •  +"..recipe.xp.." mastery XP"..compatibilityTooltip)
 				button.DoClick=function() if ok then send("start",Entity(snapshot.entity),function() net.WriteString(recipe.id) net.WriteUInt(1,8) end) end end
-				button.DoRightClick=function() focusedID=(focusedID==recipe.id) and nil or recipe.id rebuild() send("track",Entity(snapshot.entity),function() net.WriteString(recipe.id) end) end
+				button.DoRightClick=function() focusedID=(focusedID==recipe.id) and nil or recipe.id treeState.focusedID=focusedID rebuild() send("track",Entity(snapshot.entity),function() net.WriteString(recipe.id) end) end
 				nodes[recipe.id]={recipe=recipe,button=button,x=x,y=y,w=w,h=h}
 				end
 			end
 			local maxRows=0 for _,count in ipairs(rows) do maxRows=math.max(maxRows,count) end
-			canvas:SetSize(2280*scale+40,math.max(viewport:GetTall(),maxRows*112*scale+90))
+			canvas:SetSize(5*gradeSpacing*scale+nodeWidth*scale+80,math.max(viewport:GetTall(),maxRows*rowSpacing*scale+110))
 			canvas.Paint=function(_,cw,ch)
-				for grade=1,6 do local gx=(grade-1)*380*scale+24 draw.SimpleText(DRP.CraftingShared.GradeNames[grade] or ("GRADE "..grade),"DRP.Admin.Header",gx,28,grade==6 and Color(255,104,92) or colour,TEXT_ALIGN_LEFT,TEXT_ALIGN_CENTER) end
+				for grade=1,6 do local gx=(grade-1)*gradeSpacing*scale+32 draw.SimpleText(DRP.CraftingShared.GradeNames[grade] or ("GRADE "..grade),"DRP.Admin.Header",gx,30,gradeColours[grade],TEXT_ALIGN_LEFT,TEXT_ALIGN_CENTER) end
 				-- Showing every edge at once produces an unreadable web.  Only render
 				-- the focused recipe's prerequisites and dependants.
 				local focus
 				for _,node in pairs(nodes) do if IsValid(node.button) and node.button:IsHovered() then focus=node break end end
 				if not focus then return end
 				local function edge(source,target)
-					surface.SetDrawColor(80,190,245,220)
-					surface.DrawLine(source.x+source.w,source.y+source.h/2,target.x,target.y+target.h/2)
+					local grade=math.Clamp(tonumber(source.recipe and source.recipe.grade) or 1,1,6)
+					local edgeColour=gradeColours[grade]
+					local x1,y1=source.x+source.w,source.y+source.h/2
+					local x2,y2=target.x,target.y+target.h/2
+					-- A dark underlay and two-pixel coloured stroke keep nearby branches
+					-- distinguishable without returning to the old solid-blue web.
+					surface.SetDrawColor(2,7,14,230)
+					surface.DrawLine(x1,y1-1,x2,y2-1)
+					surface.DrawLine(x1,y1+2,x2,y2+2)
+					surface.SetDrawColor(edgeColour.r,edgeColour.g,edgeColour.b,235)
+					surface.DrawLine(x1,y1,x2,y2)
+					surface.DrawLine(x1,y1+1,x2,y2+1)
 				end
 				for ingredient in pairs(focus.recipe.ingredients or {}) do local source=nodes[byOutput[ingredient]] if source then edge(source,focus) end end
 				local focusOutput=string.sub(tostring(focus.recipe.id or ""),11)
@@ -219,7 +286,9 @@ function UI.Open(snapshot)
 				if focus.recipe.kind=="weapon" then for _,node in pairs(nodes) do if node.recipe.kind=="attachment" and table.HasValue(node.recipe.compatible_weapon_ids or {},focus.recipe.id) then edge(node,focus) end end end
 			end
 		end
-		search.OnValueChange=rebuild zoom.OnValueChanged=function() rebuild() end
+		search.OnValueChange=function(self) treeState.search=self:GetValue() or "" rebuild() end
+		zoom.OnValueChanged=function(self,value) treeState.zoom=tonumber(value) or .78 rebuild() end
+		attachmentToggle.OnChange=function(_,checked) treeState.showAttachments=checked and true or false rebuild() end
 		panel.PerformLayout=function() timer.Create("DRP.Crafting.TreeLayout",0,1,rebuild) end
 		rebuild() tabs:AddSheet("Technology Tree",panel,nil)
 	end
@@ -249,6 +318,9 @@ function UI.Open(snapshot)
 				end
 			end
 		end
+		local wanted=math.Clamp(math.floor(tonumber(UI.ViewState.activeTab) or 1),1,#(tabs.Items or {}))
+		local item=tabs.Items and tabs.Items[wanted]
+		if item and IsValid(item.Tab) then tabs:SetActiveTab(item.Tab) end
 	end)
 	-- The workbench is a focused full-screen interface. Hands stays closed here;
 	-- inventory management remains available through the normal Hands menu.

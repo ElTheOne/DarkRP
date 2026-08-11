@@ -5,6 +5,7 @@ local inspectRequestMessage = "drp_trust_inspect_request_v1"
 local inspectResponseMessage = "drp_trust_inspect_response_v1"
 local selfMessage = "drp_trust_self_v1"
 local selfActionMessage = "drp_trust_self_action_v1"
+local contentReportMessage = "drp_content_report_v1"
 util.AddNetworkString(announceMessage)
 util.AddNetworkString(linkMessage)
 util.AddNetworkString(inviteMessage)
@@ -12,6 +13,7 @@ util.AddNetworkString(inspectRequestMessage)
 util.AddNetworkString(inspectResponseMessage)
 util.AddNetworkString(selfMessage)
 util.AddNetworkString(selfActionMessage)
+util.AddNetworkString(contentReportMessage)
 
 local Trust = {
 	Cache = {},
@@ -19,6 +21,7 @@ local Trust = {
 	Evaluations = setmetatable({}, { __mode = "k" }),
 	PendingLinks = {},
 	RoleChecks = {},
+	ContentReports = {},
 	Config = nil,
 	ConfigPath = "darkrp/trust.json",
 	RefreshSeconds = 86400,
@@ -55,6 +58,7 @@ local function defaultConfig()
 			bot_heartbeat_url = "",
 			bot_offline_url = "",
 			bot_chat_url = "",
+			bot_content_report_url = "",
 			bot_inbox_url = "",
 			global_chat_channel_id = "",
 			role_required = true,
@@ -93,6 +97,10 @@ local function normalizeConfig(value)
 	config.discord.bot_heartbeat_url = clean(config.discord.bot_heartbeat_url, 512)
 	config.discord.bot_offline_url = clean(config.discord.bot_offline_url, 512)
 	config.discord.bot_chat_url = clean(config.discord.bot_chat_url, 512)
+	config.discord.bot_content_report_url = clean(config.discord.bot_content_report_url, 512)
+	if config.discord.bot_content_report_url == "" and string.sub(config.discord.bot_chat_url, -5) == "/chat" then
+		config.discord.bot_content_report_url = string.sub(config.discord.bot_chat_url, 1, -6) .. "/content-report"
+	end
 	config.discord.bot_inbox_url = clean(config.discord.bot_inbox_url, 512)
 	if config.discord.bot_inbox_url == "" and string.sub(config.discord.bot_chat_url, -5) == "/chat" then
 		config.discord.bot_inbox_url = string.sub(config.discord.bot_chat_url, 1, -6) .. "/inbox?channel_id={channel_id}"
@@ -563,6 +571,7 @@ function Trust:Apply(ply, state, announce)
 			net.WriteUInt(math.Clamp(known, 0, self.MaximumSignals), 4)
 			net.WriteString(label)
 		net.Broadcast()
+		self:RelayPlayerJoin(ply, state)
 	end
 	self:SendSelf(ply, state, announce == true)
 	return true
@@ -749,6 +758,136 @@ function Trust:RelayGlobalChat(ply, text)
 	end)
 	return true
 end
+
+function Trust:RelayPlayerJoin(ply, rawState)
+	if not IsValid(ply) or ply:IsBot() or ply.DRPDiscordJoinAnnounced == true
+		or not self.Config or not self.Config.discord then return false end
+	local config = self.Config.discord
+	local channelID = config.global_chat_channel_id
+	if config.bot_chat_url == "" or #channelID < 16 or #channelID > 22
+		or not string.match(channelID, "^%d+$") then return false end
+
+	local state = normalizeState(rawState or self.Cache[ply:SteamID64()])
+	ply.DRPDiscordJoinAnnounced = true
+	postJSON(config.bot_chat_url, config.headers, {
+		queue_kind = "player_join",
+		channel_id = channelID,
+		rp_name = clean(ply:DRPName(), 64),
+		steam_name = clean(ply:Nick(), 64),
+		steam_id = clean(ply:SteamID(), 32),
+		steam_id64 = clean(ply:SteamID64(), 20),
+		discord_id = state.discord_linked and state.discord_id or "",
+		discord_name = state.discord_linked and state.discord_name or "",
+		job = clean(ply:DRPJobName(), 48),
+		rank = clean(DRP.Admin and DRP.Admin.DisplayRankKey(ply) or "user", 24),
+		level = math.Clamp(math.floor(tonumber(ply:DRPXPLevel()) or 1), 1, 100),
+		civic = math.Clamp(math.floor(tonumber(DRP.Civic and DRP.Civic:Get(ply)) or 0), -32768, 32767),
+		trust_score = math.Clamp(math.floor(tonumber(state.score) or 0), 0, 100),
+		trust_label = clean(state.label, 32),
+		players = #player.GetHumans(),
+		max_players = math.max(1, game.MaxPlayers())
+	}, function(success, _, reason)
+		if success then
+			self.BotJoinErrorReported = false
+			return
+		end
+		-- Permit a later explicit trust reevaluation to retry after a transport
+		-- failure without ever producing duplicate successful join notices.
+		if IsValid(ply) then ply.DRPDiscordJoinAnnounced = nil end
+		if not self.BotJoinErrorReported then
+			self.BotJoinErrorReported = true
+			print("[DRP TRUST] Discord player join relay failed: " .. clean(reason, 96))
+		end
+	end)
+	return true
+end
+
+local contentKinds = {
+	[1] = "required_pack",
+	[2] = "invalid_model",
+	[3] = "missing_material"
+}
+local contentPlatforms = {
+	[0] = "Unknown",
+	[1] = "Windows",
+	[2] = "macOS",
+	[3] = "Linux"
+}
+local requiredContent = {
+	["2910505837"] = true,
+	["2910537020"] = true,
+	["1741741175"] = true,
+	["2486834214"] = true,
+	["2532060111"] = true,
+	["1800764828"] = true,
+	["1443497352"] = true
+}
+
+function Trust:RelayContentReport(ply, issue)
+	if not IsValid(ply) or not istable(issue) or not self.Config or not self.Config.discord then return false end
+	local config = self.Config.discord
+	local reportURL = config.bot_content_report_url
+	local channelID = config.global_chat_channel_id
+	if reportURL == "" or #channelID < 16 or #channelID > 22 or not string.match(channelID, "^%d+$") then return false end
+	local state = normalizeState(self.Cache[ply:SteamID64()])
+	postJSON(reportURL, config.headers, {
+		channel_id = channelID,
+		player_name = clean(ply:DRPName(), 64),
+		steam_id = clean(ply:SteamID(), 32),
+		steam_id64 = clean(ply:SteamID64(), 20),
+		discord_id = state.discord_linked and state.discord_id or "",
+		issue_kind = issue.kind,
+		content_id = issue.contentID,
+		asset = issue.asset,
+		entity_class = issue.entityClass,
+		platform = issue.platform,
+		branch = issue.branch
+	}, function(success, _, reason)
+		if success then return end
+		print("[DRP CONTENT] Discord report failed: " .. clean(reason, 96))
+	end)
+	return true
+end
+
+DRP.Net.Receive(contentReportMessage, function(length, ply)
+	if length > 4096 or not DRP.Net.Allow(ply, "content-report", 120, 12) then return end
+	local kind = contentKinds[net.ReadUInt(2)]
+	local contentID = clean(net.ReadString(), 20)
+	local asset = string.lower(clean(net.ReadString(), 192))
+	local entityClass = string.lower(clean(net.ReadString(), 64))
+	local platform = contentPlatforms[net.ReadUInt(2)] or "Unknown"
+	local branch = clean(net.ReadString(), 24)
+	if not kind then return end
+	if kind == "required_pack" then
+		if not requiredContent[contentID] then return end
+	elseif kind == "invalid_model" then
+		if asset ~= "models/error.mdl" and not string.match(asset, "^models/[%w_/%.-]+%.mdl$") then return end
+	elseif kind == "missing_material" then
+		if not string.match(asset, "^[%w_/%.-]+$") then return end
+	end
+	if contentID ~= "" and not requiredContent[contentID] then return end
+	if entityClass ~= "" and not string.match(entityClass, "^[%w_%-]+$") then return end
+
+	local signature = util.SHA256(table.concat({ kind, contentID, asset, entityClass }, ":"))
+	local reportKey = ply:SteamID64() .. ":" .. signature
+	local now = CurTime()
+	if (Trust.ContentReports[reportKey] or 0) > now then return end
+	Trust.ContentReports[reportKey] = now + 21600
+	if table.Count(Trust.ContentReports) > 1024 then
+		for key, expires in pairs(Trust.ContentReports) do
+			if expires <= now then Trust.ContentReports[key] = nil end
+		end
+	end
+
+	Trust:RelayContentReport(ply, {
+		kind = kind,
+		contentID = contentID,
+		asset = asset,
+		entityClass = entityClass,
+		platform = platform,
+		branch = branch
+	})
+end)
 
 function Trust:PollBotInbox()
 	if self.BotInboxPollActive or not self.Config or not self.Config.discord then return false end
@@ -1059,6 +1198,7 @@ function Trust:Start()
 	self.NetworkRefreshSeconds = self.Config.network_refresh_seconds
 	self.BotHeartbeatErrorReported = false
 	self.BotChatErrorReported = false
+	self.BotJoinErrorReported = false
 	self.BotInboxErrorReported = false
 	self.BotInboxPollActive = false
 	if self.Config.discord.bot_heartbeat_url ~= "" then

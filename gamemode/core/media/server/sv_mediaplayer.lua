@@ -22,6 +22,62 @@ util.AddNetworkString(Integration.MP3QueueMessage)
 util.AddNetworkString(Integration.MP3LibraryRequestMessage)
 util.AddNetworkString(Integration.MP3LibrarySyncMessage)
 util.AddNetworkString(Integration.MP3LibraryActionMessage)
+util.AddNetworkString(DRP.MediaPlayerLiveMessage)
+
+local LIVE_SCREEN_CLASS = "mediaplayer_tv"
+local liveListenerRange = math.max(128, tonumber(DRP.MediaPlayerLiveUIConfig.ServerRange) or 384)
+local LIVE_LISTENER_RANGE_SQR = liveListenerRange * liveListenerRange
+
+local function canSeeLiveScreen(ply, entity)
+	local eyePosition = ply:EyePos()
+	local targets = { entity:NearestPoint(eyePosition), entity:WorldSpaceCenter() }
+	for _, target in ipairs(targets) do
+		local trace = util.TraceLine({
+			start = eyePosition,
+			endpos = target,
+			filter = ply,
+			mask = MASK_SOLID
+		})
+		if not trace.Hit or trace.Entity == entity or trace.Fraction >= 0.98 then return true end
+	end
+	return false
+end
+
+local function removeLiveListener(ply, entity)
+	if not IsValid(entity) or not entity.IsMediaPlayerEntity then return end
+	local mediaPlayer = isfunction(entity.GetMediaPlayer) and entity:GetMediaPlayer() or nil
+	if mediaPlayer and isfunction(mediaPlayer.HasListener) and mediaPlayer:HasListener(ply) then
+		mediaPlayer:RemoveListener(ply)
+	end
+end
+
+DRP.Net.Receive(DRP.MediaPlayerLiveMessage, function(_, ply)
+	if net.ReadUInt(8) ~= DRP.ProtocolVersion then return end
+	local entity = net.ReadEntity()
+	local listening = net.ReadBool()
+	if not DRP.Net.Allow(ply, "media_live_listener", 0.2, 3) then return end
+
+	if not listening then
+		if entity == ply.DRPLiveMediaEntity then
+			removeLiveListener(ply, entity)
+			ply.DRPLiveMediaEntity = nil
+		end
+		return
+	end
+
+	if not IsValid(entity) or entity:GetClass() ~= LIVE_SCREEN_CLASS or not entity.IsMediaPlayerEntity then return end
+	local nearestPoint = entity:NearestPoint(ply:EyePos())
+	if not ply:Alive() or ply:EyePos():DistToSqr(nearestPoint) > LIVE_LISTENER_RANGE_SQR then return end
+	if not canSeeLiveScreen(ply, entity) then return end
+
+	if IsValid(ply.DRPLiveMediaEntity) and ply.DRPLiveMediaEntity ~= entity then
+		removeLiveListener(ply, ply.DRPLiveMediaEntity)
+	end
+	local mediaPlayer = isfunction(entity.GetMediaPlayer) and entity:GetMediaPlayer() or nil
+	if not mediaPlayer or not isfunction(mediaPlayer.HasListener) then return end
+	if not mediaPlayer:HasListener(ply) then mediaPlayer:AddListener(ply) end
+	ply.DRPLiveMediaEntity = entity
+end)
 
 local MAX_PLAYLISTS = 8
 local MAX_TRACKS = 32
@@ -433,6 +489,8 @@ function Integration:Start()
 		end
 	end)
 	hook.Add("PlayerDisconnected", "DRP.MediaPlayer.ReleaseLibrary", function(ply)
+		removeLiveListener(ply, ply.DRPLiveMediaEntity)
+		ply.DRPLiveMediaEntity = nil
 		Integration.Libraries[ply:SteamID64()] = nil
 		Integration.LibraryLoads[ply:SteamID64()] = nil
 	end)

@@ -19,16 +19,14 @@ local Props = {
 	},
 	OrphanGrace = 120,
 	DisconnectCleanupGrace = 30,
-	CleanupBatchSize = 8,
 	-- Ground weapons are temporary transport/loot objects. One slot per intended
 	-- player avoids rejecting ordinary drops while the shorter lifetime prevents
 	-- abandoned ARC9 weapons from accumulating expensive Think work.
 	DroppedEntityLifetime = 180,
 	LimitedEntityCaps = { weapon = 64, drug = 32, crate = 20, production = 40 },
 	LimitedEntityCounts = { weapon = 0, drug = 0, crate = 0, production = 0 },
-	CleanupQueue = {},
-	CleanupHead = 1,
-	CleanupTail = 0,
+	CleanupRecords = setmetatable({}, { __mode = "k" }),
+	NextCleanupID = 1,
 	TotalPropCount = 0,
 	TotalPropWeight = 0,
 	ByPlayer = setmetatable({}, {__mode = "k"}),
@@ -396,73 +394,67 @@ local function hasPropertyLease(ent)
 	return lease ~= nil
 end
 
-function Props:EnsureCleanupTimer()
-	if timer.Exists("DRP.Props.EntityCleanup") then return end
-	timer.Create("DRP.Props.EntityCleanup", 0.25, 0, function()
-		if DRP.Props == self then self:ProcessCleanupQueue() else timer.Remove("DRP.Props.EntityCleanup") end
-	end)
+local function cleanupDeadline(record)
+	local ent = record and record.entity
+	if not IsValid(ent) or ent.DRPCleanupRecord ~= record then return end
+	local owner = record.owner_id and DRP.Players and DRP.Players.Online(record.owner_id) or nil
+	if (IsValid(owner) and not record.ignore_owner)
+		or (hasPropertyLease(ent) and not record.ignore_property)
+		or ent.DRPPersistentWorldID
+		or ent.DRPPersistentPropID then
+		Props:CancelCleanup(ent)
+		return
+	end
+	Props:CancelCleanup(ent)
+	ent:Remove()
+end
+
+function Props:CancelCleanup(ent)
+	if not ent then return false end
+	local record = ent.DRPCleanupRecord
+	if not record then return false end
+	ent.DRPCleanupRecord = nil
+	self.CleanupRecords[ent] = nil
+	if record.deadline_key and DRP.Deadlines then DRP.Deadlines.Cancel(record.deadline_key) end
+	return true
 end
 
 function Props:QueueCleanup(ent, delay, reason)
 	if not IsValid(ent) or ent.DRPPersistentWorldID or ent.DRPPersistentPropID then return false end
+	local removeAt = CurTime() + math.max(0, tonumber(delay) or 0)
 	if ent.DRPCleanupRecord then
-		ent.DRPCleanupRecord.remove_at = math.min(ent.DRPCleanupRecord.remove_at, CurTime() + math.max(0, tonumber(delay) or 0))
-		ent.DRPCleanupRecord.owner_id = ent.DRPTrackedOwnerID or ent.DRPCleanupRecord.owner_id
-		ent.DRPCleanupRecord.reason = tostring(reason or ent.DRPCleanupRecord.reason)
+		local record = ent.DRPCleanupRecord
+		record.remove_at = math.min(record.remove_at, removeAt)
+		record.owner_id = ent.DRPTrackedOwnerID or record.owner_id
+		record.reason = tostring(reason or record.reason)
+		DRP.Deadlines.Schedule(record.deadline_key, record.remove_at, function() cleanupDeadline(record) end)
 		return true
 	end
+	local cleanupID = self.NextCleanupID
+	self.NextCleanupID = cleanupID + 1
 	local record = {
 		entity = ent,
 		owner_id = ent.DRPTrackedOwnerID,
-		remove_at = CurTime() + math.max(0, tonumber(delay) or 0),
+		remove_at = removeAt,
 		reason = tostring(reason or "entity budget"),
 		ignore_owner = false,
-		ignore_property = false
+		ignore_property = false,
+		deadline_key = "prop_cleanup:" .. cleanupID
 	}
 	ent.DRPCleanupRecord = record
-	self.CleanupTail = self.CleanupTail + 1
-	self.CleanupQueue[self.CleanupTail] = record
-	self:EnsureCleanupTimer()
+	self.CleanupRecords[ent] = record
+	DRP.Deadlines.Schedule(record.deadline_key, record.remove_at, function() cleanupDeadline(record) end)
 	return true
 end
 
+-- Compatibility shims for extensions which previously inspected the polling
+-- cleanup service. Cleanup is now entirely deadline driven and has no idle work.
+function Props:EnsureCleanupTimer()
+	return false
+end
+
 function Props:ProcessCleanupQueue()
-	local started = DRP.Profile and DRP.Profile.Begin and DRP.Profile.Begin() or nil
-	local processed, now = 0, CurTime()
-	local stopAt = self.CleanupTail
-	while processed < self.CleanupBatchSize and self.CleanupHead <= stopAt do
-		local record = self.CleanupQueue[self.CleanupHead]
-		self.CleanupQueue[self.CleanupHead] = nil
-		self.CleanupHead = self.CleanupHead + 1
-		processed = processed + 1
-		local ent = record and record.entity
-		if IsValid(ent) and ent.DRPCleanupRecord == record then
-			local owner = record.owner_id and DRP.Players and DRP.Players.Online(record.owner_id) or nil
-			if (IsValid(owner) and not record.ignore_owner)
-				or (hasPropertyLease(ent) and not record.ignore_property)
-				or ent.DRPPersistentWorldID
-				or ent.DRPPersistentPropID then
-				ent.DRPCleanupRecord = nil
-			elseif record.remove_at <= now then
-				ent.DRPCleanupRecord = nil
-				ent:Remove()
-			else
-				self.CleanupTail = self.CleanupTail + 1
-				self.CleanupQueue[self.CleanupTail] = record
-			end
-		end
-	end
-	if self.CleanupHead > 256 and self.CleanupHead > (self.CleanupTail * 0.5) then
-		local compact = {}
-		for index = self.CleanupHead, self.CleanupTail do
-			if self.CleanupQueue[index] then compact[#compact + 1] = self.CleanupQueue[index] end
-		end
-		self.CleanupQueue, self.CleanupHead, self.CleanupTail = compact, 1, #compact
-	elseif self.CleanupHead > self.CleanupTail then
-		self.CleanupQueue, self.CleanupHead, self.CleanupTail = {}, 1, 0
-		timer.Remove("DRP.Props.EntityCleanup")
-	end
-	if DRP.Profile and DRP.Profile.Finish then DRP.Profile.Finish("props.cleanup", started) end
+	return 0
 end
 
 function Props.ReconcileLimitedEntityCount(kind)
@@ -490,11 +482,11 @@ end
 
 function Props.UnregisterLimitedEntity(ent)
 	if not ent then return false end
+	Props:CancelCleanup(ent)
 	local kind = ent.DRPLimitedEntityKind
 	if not kind then return false end
 	Props.LimitedEntityCounts[kind] = math.max(0, (Props.LimitedEntityCounts[kind] or 1) - 1)
 	ent.DRPLimitedEntityKind = nil
-	ent.DRPCleanupRecord = nil
 	return true
 end
 
@@ -553,7 +545,7 @@ local function trackOwnedEntity(ply, ent, cleanupType, countsAsProp)
 	Props.ByEntity[ent] = ply
 	ent.DRPOwnerSteamID = ply:SteamID64()
 	ent.DRPCountsAsProp = countsAsProp == true
-	if not ent.DRPLimitedEntityKind then ent.DRPCleanupRecord = nil end
+	if not ent.DRPLimitedEntityKind then Props:CancelCleanup(ent) end
 	ent:SetCreator(ply)
 	cleanup.Add(ply, cleanupType or "sents", ent)
 	if DRP.Properties and DRP.Properties.AssignEntity then DRP.Properties:AssignEntity(ent, ply, false) end
@@ -609,8 +601,8 @@ function Props.SpawnPurchased(ply, model, trace)
 	ent:SetPos(trace.HitPos + trace.HitNormal * math.abs(ent:OBBMins().z))
 	ent:Spawn()
 	ent:Activate()
-	if DRP.Properties and DRP.Properties.ValidateEntityPlacement then
-		local validPlacement, propertyID, reason = DRP.Properties:ValidateEntityPlacement(ply, ent)
+	if DRP.Properties and DRP.Properties.ValidateSpawnedEntityPlacement then
+		local validPlacement, propertyID, reason = DRP.Properties:ValidateSpawnedEntityPlacement(ply, ent, "build")
 		if not validPlacement then
 			ent:Remove()
 			if price > 0 then DRP.Economy.Add(ply, price, "invalid prop placement refund") end
@@ -701,6 +693,13 @@ local function spawnAdminEntity(ply, class)
 	if not spawnAllowed then return end
 	local trace, position = adminSpawnTrace(ply, 16)
 	if not trace then return end
+	if DRP.Properties and DRP.Properties.ValidateSpawnPoint then
+		local permitted, _, reason = DRP.Properties:ValidateSpawnPoint(ply, trace.HitPos)
+		if not permitted then
+			notify(ply, reason or "Entities can only be spawned inside an authorised property build zone.", 3)
+			return
+		end
+	end
 
 	local entity
 	if sent and isfunction(spawnFunction) then
@@ -720,6 +719,15 @@ local function spawnAdminEntity(ply, class)
 		end
 	end
 	if not IsValid(entity) then notify(ply, "That entity could not be spawned.", 3) return end
+	if DRP.Properties and DRP.Properties.ValidateSpawnedEntityPlacement then
+		local permitted, propertyID, reason = DRP.Properties:ValidateSpawnedEntityPlacement(ply, entity, "build")
+		if not permitted then
+			entity:Remove()
+			notify(ply, reason or "The complete entity must remain inside the combined authorised build zones.", 3)
+			return
+		end
+		if propertyID then entity.DRPPropertyID = propertyID end
+	end
 	entity.DRPAdminSpawned = true
 	trackOwnedEntity(ply, entity, "sents", false)
 	hook.Run("PlayerSpawnedSENT", ply, entity)
@@ -914,7 +922,6 @@ hook.Add("EntityRemoved", "DRP.Props.Untrack", function(ent)
 		Props:ForgetPersistentEntity(ent)
 	end
 	Props.UnregisterLimitedEntity(ent)
-	ent.DRPCleanupRecord = nil
 	local ply = Props.ByEntity[ent]
 	if ply and Props.ByPlayer[ply] then Props.ByPlayer[ply][ent] = nil end
 	Props.ByEntity[ent] = nil
@@ -1149,6 +1156,9 @@ hook.Add("CanTool", "DRP.Props.OwnedToolsOnly", function(ply, trace, mode)
 	if mode == "drp_property_zone" then
 		return DRP.Properties and DRP.Properties.CanConfigure(ply) or false
 	end
+	if mode == "drp_police_route" then
+		return DRP.Admin and DRP.Admin.CanSetRanks and DRP.Admin.CanSetRanks(ply) or false
+	end
 	if not isOwner and mode == "precision" and ply:GetInfoNum("precision_entirecontrap", 0) ~= 0 then
 		ply:ConCommand("precision_entirecontrap 0")
 		ply:ChatPrint("[Tools] Entire Contraption was disabled because it could affect props you do not own. Try the action again.")
@@ -1156,6 +1166,10 @@ hook.Add("CanTool", "DRP.Props.OwnedToolsOnly", function(ply, trace, mode)
 	end
 	local entity = trace and trace.Entity
 	if not IsValid(entity) or entity:IsWorld() then return end
+	-- The user-management entity service supplies a narrowly scoped synchronous
+	-- override. It bypasses player ownership only; the remaining CanTool hooks
+	-- still protect raids, crafting escrow, corpses and other locked systems.
+	if ply.DRPAdminEntityManagement == true and DRP.Admin and DRP.Admin.Has(ply, "props") then return end
 	if isOwner and ownerHasBuildOverride(ply) then return end
 	local propertyAccess = DRP.Properties and DRP.Properties.CanManageEntity
 		and DRP.Properties.CanManageEntity(ply, entity, "build")
@@ -1233,8 +1247,8 @@ end
 hook.Add("PlayerSpawnedProp", "DRP.Props.TrackEverySpawnedProp", function(ply, model, entity)
 	local approval = ply.DRPToolPropApproval
 	ply.DRPToolPropApproval = nil
-	if DRP.Properties and DRP.Properties.ValidateEntityPlacement then
-		local validPlacement, propertyID, reason = DRP.Properties:ValidateEntityPlacement(ply, entity)
+	if DRP.Properties and DRP.Properties.ValidateSpawnedEntityPlacement then
+		local validPlacement, propertyID, reason = DRP.Properties:ValidateSpawnedEntityPlacement(ply, entity, "build")
 		if not validPlacement then
 			entity:Remove()
 			notify(ply, reason or "The complete prop must remain inside the combined authorised build zones.", 3)
@@ -1357,7 +1371,7 @@ hook.Add("DRPPlayerReady", "DRP.Props.RestorePropertyOwnership", function(ply)
 	Props.ByPlayer[ply] = owned
 	for entity in pairs(Props.ByOwnerID[ply:SteamID64()] or {}) do
 		if IsValid(entity) then
-			if not entity.DRPLimitedEntityKind then entity.DRPCleanupRecord = nil end
+			if not entity.DRPLimitedEntityKind then Props:CancelCleanup(entity) end
 			owned[entity] = true
 			Props.ByEntity[entity] = ply
 		end

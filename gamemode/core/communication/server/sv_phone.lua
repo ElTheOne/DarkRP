@@ -36,6 +36,7 @@ end
 local function hasHandset(ply)
 	if not isReadyPlayer(ply) then return false end
 	if ply:HasWeapon("ephone") then return true end
+	if ply:HasWeapon("weapon_drp_police_tablet") and ply.DRPJob and ply:DRPJob().isPolice == true then return true end
 	return ply:HasWeapon("weapon_drp_mayor_tablet")
 		and ply.DRPJob and ply:DRPJob().key == "mayor"
 end
@@ -59,7 +60,7 @@ end
 function Phone:HasPoliceTerminal(ply)
 	if not isReadyPlayer(ply) then return false end
 	local job = ply:DRPJob()
-	if job.isPolice == true then return ply:HasWeapon("ephone") end
+	if job.isPolice == true then return ply:HasWeapon("weapon_drp_police_tablet") end
 	if job.key == "mayor" then return ply:HasWeapon("weapon_drp_mayor_tablet") end
 	return false
 end

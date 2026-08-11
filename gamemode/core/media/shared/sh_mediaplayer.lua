@@ -1,4 +1,11 @@
 DRP.MediaPlayerWorkshopID = "3001397905"
+DRP.MediaPlayerLiveMessage = "drp_media_live_listener_v1"
+DRP.MediaPlayerLiveUIConfig = DRP.MediaPlayerLiveUIConfig or {
+	EntryRange = 280,
+	ExitRange = 340,
+	ServerRange = 384,
+	ScanInterval = 0.25
+}
 
 DRP.MediaPlayerScreens = {
 	{

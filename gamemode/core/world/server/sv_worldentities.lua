@@ -168,6 +168,13 @@ DRP.Net.Receive(SELECT, function(_, ply)
 	end
 	if mode == "drp_property_zone" and (not DRP.Properties or not DRP.Properties.CanConfigure(ply)) then return end
 	if DRP.JobService and DRP.JobService.EnsureSandboxWeapons then DRP.JobService:EnsureSandboxWeapons() end
+	-- A selection request is an explicit recovery point. Register sources again
+	-- before rejecting a mode so startup-order delays cannot strand a valid
+	-- bundled stool until the next map/server restart.
+	if DRP.Toolgun and DRP.Toolgun.IsModeReady and not DRP.Toolgun.IsModeReady(mode)
+		and DRP.Toolgun.RetryBundledSources then
+		DRP.Toolgun.RetryBundledSources()
+	end
 	local stored = weapons.GetStored("gmod_tool")
 	local liveToolgun = ply:GetWeapon("gmod_tool")
 	local registered = (stored and istable(stored.Tool) and istable(stored.Tool[mode]))

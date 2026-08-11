@@ -47,7 +47,10 @@ local function buildSettings(mode, tool)
 	panel:SetSize(width, height)
 	panel:SetPos(ScrW() - width - 20, math.floor((ScrH() - height) * 0.5))
 	panel:SetMouseInputEnabled(true)
-	panel:SetKeyboardInputEnabled(false)
+	-- Tool panels contain real text entries (route names, precision values,
+	-- presets). Disabling keyboard input on their root made every child entry
+	-- appear clickable while silently discarding typed characters.
+	panel:SetKeyboardInputEnabled(true)
 	panel:SetZPos(32760)
 	panel.Paint = function(_, panelWidth, panelHeight)
 		draw.RoundedBox(10, 0, 0, panelWidth, panelHeight, colors.background)

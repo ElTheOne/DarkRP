@@ -280,7 +280,6 @@ function Props.MakeWorldEntity(ent)
 	end
 	Props.ByEntity[ent] = nil
 	Props.UnregisterLimitedEntity(ent)
-	ent.DRPCleanupRecord = nil
 	ent.DRPTrackedOwnerID = nil
 	ent.DRPTrackedCountsAsProp = nil
 	ent.DRPOwnerSteamID = nil

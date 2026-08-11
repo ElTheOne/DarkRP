@@ -1,10 +1,12 @@
 local requestMessage = "drp_mug_request_v1"
 local noticeMessage = "drp_mug_notice_v1"
 local moneyMessage = "drp_money_drop_v1"
+local actionMessage = "drp_mug_action_v1"
 
 util.AddNetworkString(requestMessage)
 util.AddNetworkString(noticeMessage)
 util.AddNetworkString(moneyMessage)
+util.AddNetworkString(actionMessage)
 
 local Mugging = {
 	Active = {},
@@ -226,9 +228,13 @@ function Mugging.Begin(mugger, victim, amount)
 	DRP.Incidents.Grant(incident, "take_money", mugger, victim, "Mugging demand", deadline)
 	DRP.Incidents.AddEvidence(incident, "demand_issued", mugger, victim, "Initiated at close range for " .. moneyText(amount))
 	DRP.Net.Notify(mugger, "Mugging " .. victim:Nick() .. " for " .. moneyText(amount) .. ". They have 10 seconds.", 1)
-	DRP.Net.Notify(victim, mugger:Nick() .. " is mugging you for " .. moneyText(amount) .. ". Use /dropmoney " .. amount .. " within 10 seconds.", 2)
+	DRP.Net.Notify(victim, mugger:Nick() .. " is mugging you for " .. moneyText(amount) .. ". Use the demand panel to drop the cash within 10 seconds.", 2)
 	sendNotice(mugger, 1, false, victim, amount, Mugging.DemandTime, "Awaiting payment")
 	sendNotice(victim, 1, true, mugger, amount, Mugging.DemandTime, "Moving, switching weapons or attacking escalates PvP")
+	if DRP.Hints and DRP.Hints.Send then
+		DRP.Hints:Send(victim, "mugging_payment", "A mugging demand is active",
+			"Use the demand panel to drop the exact remaining cash. You may decide later and reopen it from the HUD; press Z or F3 to enable the free cursor.", 2, 7, true)
+	end
 	if DRP.Audit then DRP.Audit.Log(mugger, "mugging_started", victim, amount) end
 	return true
 end
@@ -349,7 +355,7 @@ function DRP.Money.Drop(ply, amount)
 		return false
 	end
 
-	if not DRP.Economy.Take(ply, amount, "cash dropped") then
+	if not DRP.Economy.Take(ply, amount, "cash dropped", { kind = "custody", source = "cash dropped" }) then
 		entity:Remove()
 		DRP.Net.Notify(ply, "Your wallet changed before the cash could be dropped.", 3)
 		return false
@@ -383,6 +389,24 @@ function DRP.Money.Drop(ply, amount)
 
 	if record and Mugging.Active[record.id] and record.paid >= record.amount then paid(record) end
 	return true
+end
+
+function Mugging:PayDemand(victim)
+	local record = self.ByVictim[victim]
+	if not record or not self.Active[record.id] or record.combat then
+		DRP.Net.Notify(victim, "There is no pending mugging demand to pay.", 3)
+		return false
+	end
+	if CurTime() >= record.expires then
+		escalate(record, "cash was not dropped within 10 seconds")
+		return false
+	end
+	local remaining = math.max(0, record.amount - (record.paid or 0))
+	if remaining <= 0 then
+		paid(record)
+		return true
+	end
+	return DRP.Money.Drop(victim, remaining)
 end
 
 function DRP.Money.SpawnSystemDrop(amount, position, allowedIDs, options)
@@ -437,6 +461,13 @@ DRP.Net.Receive(requestMessage, function(_, ply)
 	Mugging.Begin(ply, aimedPlayer(ply), amount)
 end)
 
+DRP.Net.Receive(actionMessage, function(_, ply)
+	if net.ReadUInt(8) ~= DRP.ProtocolVersion then return end
+	local action = net.ReadUInt(2)
+	if not DRP.Net.Allow(ply, "mug_action", 2, 2) then return end
+	if action == 1 then Mugging:PayDemand(ply) end
+end)
+
 hook.Add("PlayerUse", "DRP.Money.Pickup", function(ply, entity)
 	local drop = Mugging.MoneyDrops[entity]
 	if not drop then return end
@@ -451,7 +482,7 @@ hook.Add("PlayerUse", "DRP.Money.Pickup", function(ply, entity)
 	end
 	Mugging.MoneyDrops[entity] = nil
 	DRP.Deadlines.Cancel("moneydrop:" .. entity:EntIndex())
-	DRP.Economy.Add(ply, drop.amount, "cash picked up")
+	DRP.Economy.Add(ply, drop.amount, "cash picked up", { kind = "custody", source = drop.source or "cash pickup" })
 	if DRP.Audit then DRP.Audit.Log(ply, drop.system and "system_money_picked_up" or "money_picked_up", drop.dropper, drop.amount .. (drop.source and (" " .. drop.source) or "")) end
 	entity:Remove()
 	return false

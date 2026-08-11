@@ -1,3 +1,10 @@
+import {
+  canIdentify,
+  gatewayClosePolicy,
+  reconnectDelay,
+  sessionStartState
+} from "./gateway-policy.js";
+
 const DISCORD_API = "https://discord.com/api/v10";
 const BOT_OBJECT_NAME = "darkrp-primary";
 const SERVER_TTL_MS = 150000;
@@ -5,6 +12,34 @@ const GUILD_MEMBERS_INTENT = 1 << 1;
 const GUILD_MESSAGES_INTENT = 1 << 9;
 const MESSAGE_CONTENT_INTENT = 1 << 15;
 const ARCADE_PREFIX = "/arcade/";
+const GATEWAY_CONTROL_KEY = "gatewayControlV2";
+const GATEWAY_SESSION_KEY = "gatewaySessionV2";
+
+const randomUnit = () => {
+  const value = new Uint32Array(1);
+  crypto.getRandomValues(value);
+  return value[0] / 0xffffffff;
+};
+
+const tokenFingerprint = async token => {
+  if (!token) return "";
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
+  return Array.from(new Uint8Array(digest).slice(0, 12), byte => byte.toString(16).padStart(2, "0")).join("");
+};
+
+const gatewayControlDefaults = fingerprint => ({
+  tokenFingerprint: fingerprint,
+  attempts: 0,
+  nextAttemptAt: 0,
+  fatalCode: 0,
+  fatalReason: "",
+  identifyRemaining: -1,
+  identifyResetAt: 0,
+  lastCloseCode: 0,
+  lastCloseReason: "",
+  lastIdentifyAt: 0,
+  lastReadyAt: 0
+});
 
 const json = (value, status = 200) => new Response(JSON.stringify(value), {
   status,
@@ -594,7 +629,9 @@ async function botControl(request, url, env, action) {
     if (value !== null) target.searchParams.set(key, value);
   }
   const id = env.BOT_PRESENCE.idFromName(BOT_OBJECT_NAME);
-  return env.BOT_PRESENCE.get(id).fetch(target.toString());
+  return env.BOT_PRESENCE.get(id).fetch(target.toString(), {
+    method: action === "reset" ? "POST" : "GET"
+  });
 }
 
 async function botInbox(request, url, env) {
@@ -736,21 +773,70 @@ async function botChat(request, env) {
   if (raw.length > 4096) return json({ accepted: false, error: "payload_too_large" }, 413);
   const data = JSON.parse(raw);
   const payload = {
+    queue_kind: safeText(data.queue_kind, 24),
     channel_id: safeText(data.channel_id, 22),
     rp_name: safeText(data.rp_name, 64),
+    steam_name: safeText(data.steam_name, 64),
     steam_id: safeText(data.steam_id, 32),
     steam_id64: safeText(data.steam_id64, 20),
     discord_id: safeText(data.discord_id, 22),
     discord_name: safeText(data.discord_name, 64),
-    message: safeText(data.message, 240)
+    message: safeText(data.message, 240),
+    job: safeText(data.job, 48),
+    rank: safeText(data.rank, 24),
+    level: Math.max(1, Math.min(100, Number.parseInt(data.level, 10) || 1)),
+    civic: Math.max(-32768, Math.min(32767, Number.parseInt(data.civic, 10) || 0)),
+    trust_score: Math.max(0, Math.min(100, Number.parseInt(data.trust_score, 10) || 0)),
+    trust_label: safeText(data.trust_label, 32),
+    players: Math.max(0, Math.min(128, Number.parseInt(data.players, 10) || 0)),
+    max_players: Math.max(1, Math.min(128, Number.parseInt(data.max_players, 10) || 64))
   };
-  if (!validDiscordID(payload.channel_id) || !validSteamID(payload.steam_id64) || !payload.rp_name || !payload.message) {
+  const playerJoin = payload.queue_kind === "player_join";
+  if (payload.queue_kind && !playerJoin) return json({ accepted: false, error: "invalid_message_kind" }, 400);
+  if (!validDiscordID(payload.channel_id) || !validSteamID(payload.steam_id64) || !payload.rp_name
+    || (!playerJoin && !payload.message)) {
     return json({ accepted: false, error: "invalid_message" }, 400);
   }
   if (payload.discord_id && !validDiscordID(payload.discord_id)) payload.discord_id = "";
   if (!env.BOT_PRESENCE) return json({ accepted: false, error: "bot_presence_not_bound" }, 503);
   const id = env.BOT_PRESENCE.idFromName(BOT_OBJECT_NAME);
   return env.BOT_PRESENCE.get(id).fetch("https://bot.internal/chat", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+}
+
+async function botContentReport(request, env) {
+  if (!await authorized(request, env)) return json({ error: "unauthorized" }, 401);
+  const declaredLength = Number.parseInt(request.headers.get("content-length") || "0", 10);
+  if (declaredLength > 4096) return json({ accepted: false, error: "payload_too_large" }, 413);
+  const raw = await request.text();
+  if (raw.length > 4096) return json({ accepted: false, error: "payload_too_large" }, 413);
+  const data = JSON.parse(raw);
+  const payload = {
+    queue_kind: "content_report",
+    channel_id: safeText(data.channel_id, 22),
+    player_name: safeText(data.player_name, 64),
+    steam_id: safeText(data.steam_id, 32),
+    steam_id64: safeText(data.steam_id64, 20),
+    discord_id: safeText(data.discord_id, 22),
+    issue_kind: safeText(data.issue_kind, 32),
+    content_id: safeText(data.content_id, 20),
+    asset: safeText(data.asset, 192),
+    entity_class: safeText(data.entity_class, 64),
+    platform: safeText(data.platform, 16),
+    branch: safeText(data.branch, 24)
+  };
+  const validKinds = new Set(["required_pack", "invalid_model", "missing_material"]);
+  if (!validDiscordID(payload.channel_id) || !validSteamID(payload.steam_id64)
+    || !payload.player_name || !validKinds.has(payload.issue_kind) || !payload.asset) {
+    return json({ accepted: false, error: "invalid_content_report" }, 400);
+  }
+  if (payload.discord_id && !validDiscordID(payload.discord_id)) payload.discord_id = "";
+  if (!env.BOT_PRESENCE) return json({ accepted: false, error: "bot_presence_not_bound" }, 503);
+  const id = env.BOT_PRESENCE.idFromName(BOT_OBJECT_NAME);
+  return env.BOT_PRESENCE.get(id).fetch("https://bot.internal/content-report", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(payload)
@@ -778,6 +864,11 @@ export class BotPresence {
     this.watchedChannelID = "";
     this.joinCard = null;
     this.joinCardSyncing = false;
+    this.connectionMode = "identify";
+    this.sessionStart = null;
+    this.gatewayControl = null;
+    this.gatewayStateLoaded = false;
+    this.gatewayStateLoading = null;
   }
 
   async fetch(request) {
@@ -797,7 +888,13 @@ export class BotPresence {
       await this.ensureConnected();
       this.updatePresence();
       this.state.waitUntil(this.syncJoinCard());
-      return json({ active: true, configured: Boolean(this.env.DISCORD_BOT_TOKEN), ready: this.ready });
+      return json({
+        active: true,
+        configured: Boolean(this.env.DISCORD_BOT_TOKEN),
+        ready: this.ready,
+        locked: Boolean(this.gatewayControl?.fatalCode),
+        next_attempt_at: this.gatewayControl?.nextAttemptAt || 0
+      });
     }
     if (url.pathname === "/offline") {
       await this.state.storage.delete("server");
@@ -807,6 +904,13 @@ export class BotPresence {
       return json({ active: false });
     }
     if (url.pathname === "/chat" && request.method === "POST") {
+      const payload = await request.json();
+      if (this.chatQueue.length >= 200) this.chatQueue.shift();
+      this.chatQueue.push(payload);
+      this.state.waitUntil(this.drainChat());
+      return json({ accepted: true, queued: this.chatQueue.length });
+    }
+    if (url.pathname === "/content-report" && request.method === "POST") {
       const payload = await request.json();
       if (this.chatQueue.length >= 200) this.chatQueue.shift();
       this.chatQueue.push(payload);
@@ -847,6 +951,16 @@ export class BotPresence {
       const result = await this.syncJoinCard(true);
       return json(result, result.posted ? 200 : 502);
     }
+    if (url.pathname === "/status") {
+      await this.loadGatewayState();
+      return json(this.gatewayStatus());
+    }
+    if (url.pathname === "/reset" && request.method === "POST") {
+      await this.disconnect(4000, "Gateway state reset", true);
+      await this.resetGatewayState("manual_reset");
+      await this.ensureConnected();
+      return json(this.gatewayStatus());
+    }
     return json({ error: "not_found" }, 404);
   }
 
@@ -867,29 +981,161 @@ export class BotPresence {
     return this.server && Date.now() - this.server.lastSeen < SERVER_TTL_MS;
   }
 
+  async loadGatewayState() {
+    const fingerprint = await tokenFingerprint(this.env.DISCORD_BOT_TOKEN);
+    if (this.gatewayStateLoaded && this.gatewayControl?.tokenFingerprint === fingerprint) return;
+    if (this.gatewayStateLoading) return this.gatewayStateLoading;
+    this.gatewayStateLoading = (async () => {
+      const [storedControl, storedSession] = await Promise.all([
+        this.state.storage.get(GATEWAY_CONTROL_KEY),
+        this.state.storage.get(GATEWAY_SESSION_KEY)
+      ]);
+      if (!storedControl || storedControl.tokenFingerprint !== fingerprint) {
+        this.gatewayControl = gatewayControlDefaults(fingerprint);
+        this.sequence = null;
+        this.sessionID = null;
+        this.resumeURL = null;
+        await this.state.storage.put({
+          [GATEWAY_CONTROL_KEY]: this.gatewayControl,
+          [GATEWAY_SESSION_KEY]: { sessionID: null, sequence: null, resumeURL: null }
+        });
+      } else {
+        this.gatewayControl = { ...gatewayControlDefaults(fingerprint), ...storedControl };
+        this.sequence = Number.isInteger(storedSession?.sequence) ? storedSession.sequence : null;
+        this.sessionID = safeText(storedSession?.sessionID, 128) || null;
+        this.resumeURL = safeText(storedSession?.resumeURL, 256) || null;
+      }
+      this.gatewayStateLoaded = true;
+    })();
+    try {
+      await this.gatewayStateLoading;
+    } finally {
+      this.gatewayStateLoading = null;
+    }
+  }
+
+  async persistGatewayControl() {
+    if (this.gatewayControl) await this.state.storage.put(GATEWAY_CONTROL_KEY, this.gatewayControl);
+  }
+
+  async persistGatewaySession() {
+    await this.state.storage.put(GATEWAY_SESSION_KEY, {
+      sessionID: this.sessionID,
+      sequence: this.sequence,
+      resumeURL: this.resumeURL
+    });
+  }
+
+  async clearGatewaySession() {
+    this.sequence = null;
+    this.sessionID = null;
+    this.resumeURL = null;
+    await this.persistGatewaySession();
+  }
+
+  async resetGatewayState(reason) {
+    const fingerprint = await tokenFingerprint(this.env.DISCORD_BOT_TOKEN);
+    this.gatewayControl = gatewayControlDefaults(fingerprint);
+    this.gatewayControl.lastCloseReason = safeText(reason, 160);
+    this.gatewayStateLoaded = true;
+    await this.clearGatewaySession();
+    await this.persistGatewayControl();
+  }
+
+  async lockGateway(code, reason) {
+    await this.loadGatewayState();
+    this.gatewayControl.fatalCode = Number.parseInt(code, 10) || 4000;
+    this.gatewayControl.fatalReason = safeText(reason, 160) || "fatal_gateway_error";
+    this.gatewayControl.nextAttemptAt = 0;
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    await this.clearGatewaySession();
+    await this.persistGatewayControl();
+    console.error("Discord gateway locked", JSON.stringify({
+      code: this.gatewayControl.fatalCode,
+      reason: this.gatewayControl.fatalReason
+    }));
+  }
+
+  gatewayStatus() {
+    const control = this.gatewayControl || gatewayControlDefaults("");
+    return {
+      configured: Boolean(this.env.DISCORD_BOT_TOKEN),
+      server_live: Boolean(this.isServerLive()),
+      socket_state: this.socket?.readyState ?? WebSocket.CLOSED,
+      connecting: this.connecting,
+      ready: this.ready,
+      resumable_session: Boolean(this.sessionID && Number.isInteger(this.sequence) && this.resumeURL),
+      connection_mode: this.connectionMode,
+      attempts: control.attempts,
+      next_attempt_at: control.nextAttemptAt,
+      fatal_code: control.fatalCode,
+      fatal_reason: control.fatalReason,
+      identify_remaining: control.identifyRemaining,
+      identify_reset_at: control.identifyResetAt,
+      last_close_code: control.lastCloseCode,
+      last_close_reason: control.lastCloseReason,
+      last_identify_at: control.lastIdentifyAt,
+      last_ready_at: control.lastReadyAt
+    };
+  }
+
   async ensureConnected() {
     if (!this.env.DISCORD_BOT_TOKEN || this.connecting || (this.socket && this.socket.readyState <= WebSocket.OPEN)) return;
     this.connecting = true;
     try {
+      await this.loadGatewayState();
       if (!this.server) this.server = await this.state.storage.get("server");
       if (validDiscordID(this.server?.channelID)) this.watchedChannelID = this.server.channelID;
       if (!this.isServerLive()) return;
-      const gatewayResponse = await fetch(`${DISCORD_API}/gateway/bot`, {
-        headers: { authorization: `Bot ${this.env.DISCORD_BOT_TOKEN}` }
-      });
-      if (!gatewayResponse.ok) throw new Error(`Discord gateway HTTP ${gatewayResponse.status}`);
-      const gateway = await gatewayResponse.json();
-      const base = safeText(gateway.url, 256) || "wss://gateway.discord.gg";
+      if (this.gatewayControl.fatalCode) return;
+      const now = Date.now();
+      if (this.gatewayControl.nextAttemptAt > now) {
+        this.armReconnect(this.gatewayControl.nextAttemptAt - now);
+        return;
+      }
+
+      const canResumeSession = Boolean(this.sessionID && Number.isInteger(this.sequence) && this.resumeURL);
+      let base = canResumeSession ? this.resumeURL : "";
+      this.sessionStart = null;
+      if (!canResumeSession) {
+        const gatewayResponse = await fetch(`${DISCORD_API}/gateway/bot`, {
+          headers: { authorization: `Bot ${this.env.DISCORD_BOT_TOKEN}` }
+        });
+        if (!gatewayResponse.ok) {
+          if (gatewayResponse.status === 401 || gatewayResponse.status === 403) {
+            await this.lockGateway(4004, `gateway_http_${gatewayResponse.status}`);
+          } else {
+            const retryAfter = Math.max(0, Number.parseFloat(gatewayResponse.headers.get("retry-after") || "0") * 1000);
+            await this.scheduleReconnect(`gateway_http_${gatewayResponse.status}`, retryAfter);
+          }
+          return;
+        }
+        const gateway = await gatewayResponse.json();
+        base = safeText(gateway.url, 256) || "wss://gateway.discord.gg";
+        this.sessionStart = sessionStartState(gateway.session_start_limit, now);
+        this.gatewayControl.identifyRemaining = this.sessionStart.remaining;
+        this.gatewayControl.identifyResetAt = this.sessionStart.resetAt;
+        await this.persistGatewayControl();
+        if (!canIdentify(this.gatewayControl, now)) {
+          this.gatewayControl.nextAttemptAt = this.gatewayControl.identifyResetAt;
+          await this.persistGatewayControl();
+          this.armReconnect(this.gatewayControl.nextAttemptAt - now);
+          return;
+        }
+      }
+
+      this.connectionMode = canResumeSession ? "resume" : "identify";
       const socket = new WebSocket(`${base}/?v=10&encoding=json`);
       socket.addEventListener("message", event => this.state.waitUntil(this.onMessage(event.data)));
-      socket.addEventListener("close", () => this.onClosed(socket));
+      socket.addEventListener("close", event => this.state.waitUntil(this.onClosed(socket, event.code, event.reason)));
       socket.addEventListener("error", () => {
         if (socket.readyState < WebSocket.CLOSING) socket.close(1011, "Gateway error");
       });
       this.socket = socket;
     } catch (error) {
       console.error("Discord gateway connection failed", error);
-      this.scheduleReconnect();
+      await this.scheduleReconnect("connection_exception");
     } finally {
       this.connecting = false;
     }
@@ -901,28 +1147,49 @@ export class BotPresence {
     if (Number.isInteger(packet.s)) this.sequence = packet.s;
     if (packet.op === 10) {
       this.startHeartbeat(Math.max(5000, Number(packet.d?.heartbeat_interval) || 41250));
-      this.send({
-        op: 2,
-        d: {
-          token: this.env.DISCORD_BOT_TOKEN,
-          intents: GUILD_MEMBERS_INTENT | GUILD_MESSAGES_INTENT | MESSAGE_CONTENT_INTENT,
-          properties: { os: "linux", browser: "darkrp-foundation", device: "darkrp-foundation" },
-          presence: this.presencePayload()
+      if (this.connectionMode === "resume" && this.sessionID && Number.isInteger(this.sequence)) {
+        this.send({ op: 6, d: { token: this.env.DISCORD_BOT_TOKEN, session_id: this.sessionID, seq: this.sequence } });
+      } else {
+        await this.loadGatewayState();
+        if (!canIdentify(this.gatewayControl)) {
+          await this.disconnect(4000, "Identify allowance exhausted", true);
+          this.armReconnect(Math.max(1000, this.gatewayControl.identifyResetAt - Date.now()));
+          return;
         }
-      });
+        if (this.gatewayControl.identifyRemaining >= 0) this.gatewayControl.identifyRemaining = Math.max(0, this.gatewayControl.identifyRemaining - 1);
+        this.gatewayControl.lastIdentifyAt = Date.now();
+        await this.persistGatewayControl();
+        this.send({
+          op: 2,
+          d: {
+            token: this.env.DISCORD_BOT_TOKEN,
+            intents: GUILD_MEMBERS_INTENT | GUILD_MESSAGES_INTENT | MESSAGE_CONTENT_INTENT,
+            properties: { os: "linux", browser: "darkrp-foundation", device: "darkrp-foundation" },
+            presence: this.presencePayload()
+          }
+        });
+      }
       return;
     }
     if (packet.op === 11) {
       this.heartbeatAcknowledged = true;
+      if (this.sessionID && Number.isInteger(this.sequence)) await this.persistGatewaySession();
       return;
     }
     if (packet.op === 1) {
       this.send({ op: 1, d: this.sequence });
       return;
     }
-    if (packet.op === 7 || packet.op === 9) {
+    if (packet.op === 7) {
       await this.disconnect(4000, "Discord requested reconnect", true);
-      this.scheduleReconnect();
+      await this.scheduleReconnect("gateway_reconnect", 1000);
+      return;
+    }
+    if (packet.op === 9) {
+      const resumable = packet.d === true && this.sessionID && Number.isInteger(this.sequence);
+      if (!resumable) await this.clearGatewaySession();
+      await this.disconnect(4000, "Discord invalid session", true);
+      await this.scheduleReconnect("invalid_session", 1000 + Math.floor(randomUnit() * 4000));
       return;
     }
     if (packet.op !== 0) return;
@@ -930,6 +1197,19 @@ export class BotPresence {
       this.ready = true;
       this.sessionID = packet.d?.session_id || null;
       this.resumeURL = packet.d?.resume_gateway_url || null;
+      this.gatewayControl.attempts = 0;
+      this.gatewayControl.nextAttemptAt = 0;
+      this.gatewayControl.lastReadyAt = Date.now();
+      await this.persistGatewaySession();
+      await this.persistGatewayControl();
+      this.updatePresence();
+    } else if (packet.t === "RESUMED") {
+      this.ready = true;
+      this.gatewayControl.attempts = 0;
+      this.gatewayControl.nextAttemptAt = 0;
+      this.gatewayControl.lastReadyAt = Date.now();
+      await this.persistGatewaySession();
+      await this.persistGatewayControl();
       this.updatePresence();
     } else if (packet.t === "INTERACTION_CREATE") {
       await this.handleInteraction(packet.d);
@@ -942,6 +1222,7 @@ export class BotPresence {
 
   startHeartbeat(interval) {
     if (this.heartbeatTimer) clearTimeout(this.heartbeatTimer);
+    this.heartbeatAcknowledged = true;
     const beat = () => {
       if (!this.isServerLive() || !this.socket || this.socket.readyState !== WebSocket.OPEN) return;
       if (!this.heartbeatAcknowledged) {
@@ -952,7 +1233,7 @@ export class BotPresence {
       this.send({ op: 1, d: this.sequence });
       this.heartbeatTimer = setTimeout(beat, interval);
     };
-    this.heartbeatTimer = setTimeout(beat, Math.floor(Math.random() * interval));
+    this.heartbeatTimer = setTimeout(beat, Math.floor(randomUnit() * interval));
   }
 
   presencePayload() {
@@ -1138,9 +1419,46 @@ export class BotPresence {
     try {
       while (this.chatQueue.length > 0) {
         const entry = this.chatQueue[0];
-        const identity = entry.discord_id
-          ? `<@${entry.discord_id}>${entry.discord_name ? ` (${escapeDiscord(entry.discord_name)})` : ""}`
-          : "Not linked";
+        let content;
+        if (entry.queue_kind === "player_join") {
+          const discordIdentity = entry.discord_id
+            ? `<@${entry.discord_id}>${entry.discord_name ? ` (${escapeDiscord(entry.discord_name)})` : ""}`
+            : "Not linked";
+          const population = `${entry.players}/${entry.max_players}`;
+          content = `## Player joined the server\n**${escapeDiscord(entry.rp_name)}** has connected.\n\n**Steam:** ${escapeDiscord(entry.steam_name || entry.rp_name)} · \`${escapeDiscord(entry.steam_id)}\`\n**Discord:** ${discordIdentity}\n**Role:** ${escapeDiscord(entry.job || "Citizen")} · ${escapeDiscord(entry.rank || "user")} · Level ${entry.level}\n**Civic:** ${entry.civic >= 0 ? "+" : ""}${entry.civic} · **Trust:** ${entry.trust_score}/100 (${escapeDiscord(entry.trust_label || "Unknown")})\n**Online:** ${population}`;
+        } else if (entry.queue_kind === "content_report") {
+          const issueLabels = {
+            required_pack: "Required Workshop pack is unavailable",
+            invalid_model: "Missing or invalid model",
+            missing_material: "Missing material or purple checker texture"
+          };
+          const contentNames = {
+            "2910505837": "ARC9 Weapon Base",
+            "2910537020": "ARC9 Gunsmith Reloaded",
+            "1741741175": "Zero's Grow OP Content",
+            "2486834214": "Zero's MethLab 2 Content",
+            "2532060111": "zcLib Content",
+            "1800764828": "Portal Gun",
+            "1443497352": "Keys Content"
+          };
+          const macAppleDouble = entry.issue_kind === "required_pack" && entry.platform === "macOS";
+          const recovery = macAppleDouble
+            ? `1. Fully exit Garry's Mod.\n2. Open Steam's Workshop folder for item \`${escapeDiscord(entry.content_id)}\` and remove only files beginning with \`._\`.\n3. Relaunch, reconnect and run \`drp_content_repair\` if the asset is still unavailable.`
+            : entry.issue_kind === "required_pack"
+              ? "1. In game, run `drp_content_repair`.\n2. If it remains broken, fully exit Garry's Mod and allow Steam Workshop downloads to finish.\n3. Relaunch and reconnect. If still broken, verify Garry's Mod files and resubscribe to the affected Workshop item."
+              : "1. Look at the broken entity and run `drp_content_status` in the client console.\n2. Fully exit Garry's Mod and allow Steam Workshop downloads to finish.\n3. Relaunch and reconnect. If unresolved, verify Garry's Mod files and resubscribe to the server collection.";
+          const contentLine = entry.content_id ? `\n**Workshop item:** \`${escapeDiscord(entry.content_id)}\`` : "";
+          const addonLine = entry.content_id && contentNames[entry.content_id]
+            ? `\n**Addon:** ${escapeDiscord(contentNames[entry.content_id])}`
+            : "";
+          const classLine = entry.entity_class ? `\n**Entity:** \`${escapeDiscord(entry.entity_class)}\`` : "";
+          content = `## Client content failure\n**Player:** ${escapeDiscord(entry.player_name)} · \`${escapeDiscord(entry.steam_id)}\` · \`${escapeDiscord(entry.steam_id64)}\`\n**Issue:** ${issueLabels[entry.issue_kind] || "Content failure"}${addonLine}${contentLine}${classLine}\n**Asset:** \`${escapeDiscord(entry.asset)}\`\n**Client:** ${escapeDiscord(entry.platform || "Unknown")} · ${escapeDiscord(entry.branch || "unknown")}\n\n### How the player can fix it\n${recovery}`;
+        } else {
+          const identity = entry.discord_id
+            ? `<@${entry.discord_id}>${entry.discord_name ? ` (${escapeDiscord(entry.discord_name)})` : ""}`
+            : "Not linked";
+          content = `**${escapeDiscord(entry.rp_name)}** · \`${escapeDiscord(entry.steam_id)}\` · Discord: ${identity}\n${escapeDiscord(entry.message)}`;
+        }
         const response = await fetch(`${DISCORD_API}/channels/${entry.channel_id}/messages`, {
           method: "POST",
           headers: {
@@ -1148,7 +1466,7 @@ export class BotPresence {
             "content-type": "application/json"
           },
           body: JSON.stringify({
-            content: `**${escapeDiscord(entry.rp_name)}** · \`${escapeDiscord(entry.steam_id)}\` · Discord: ${identity}\n${escapeDiscord(entry.message)}`,
+            content,
             allowed_mentions: { parse: [], users: [] }
           })
         });
@@ -1187,21 +1505,47 @@ export class BotPresence {
     if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify(packet));
   }
 
-  onClosed(socket) {
+  async onClosed(socket, code, reason) {
     if (this.socket !== socket) return;
     this.socket = null;
     this.ready = false;
     if (this.heartbeatTimer) clearTimeout(this.heartbeatTimer);
     this.heartbeatTimer = null;
-    this.scheduleReconnect();
+    await this.loadGatewayState();
+
+    const normalizedCode = Number.parseInt(code, 10) || 1006;
+    const normalizedReason = safeText(reason, 160) || "gateway_closed";
+    this.gatewayControl.lastCloseCode = normalizedCode;
+    this.gatewayControl.lastCloseReason = normalizedReason;
+    const policy = gatewayClosePolicy(normalizedCode);
+    if (policy.fatal) {
+      await this.lockGateway(normalizedCode, normalizedReason);
+      return;
+    }
+    if (policy.resumable) await this.persistGatewaySession();
+    else await this.clearGatewaySession();
+    await this.persistGatewayControl();
+    await this.scheduleReconnect(`gateway_close_${normalizedCode}`);
   }
 
-  scheduleReconnect() {
-    if (!this.isServerLive() || this.reconnectTimer) return;
+  armReconnect(delay) {
+    if (!this.isServerLive() || this.gatewayControl?.fatalCode) return;
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.state.waitUntil(this.ensureConnected());
-    }, 5000);
+    }, Math.max(250, Math.min(300000, Number(delay) || 0)));
+  }
+
+  async scheduleReconnect(reason, minimumDelay = 0) {
+    await this.loadGatewayState();
+    if (!this.isServerLive() || this.gatewayControl.fatalCode || this.reconnectTimer) return;
+    this.gatewayControl.attempts = Math.min(12, Math.max(0, this.gatewayControl.attempts) + 1);
+    const delay = Math.max(Number(minimumDelay) || 0, reconnectDelay(this.gatewayControl.attempts, randomUnit()));
+    this.gatewayControl.nextAttemptAt = Date.now() + delay;
+    this.gatewayControl.lastCloseReason = safeText(reason, 160) || this.gatewayControl.lastCloseReason;
+    await this.persistGatewayControl();
+    this.armReconnect(delay);
   }
 
   async disconnect(code, reason, preserveServer = false) {
@@ -1234,9 +1578,12 @@ export default {
       if (request.method === "GET" && url.pathname === "/discord/bot/invite") return botInvite(request, url, env);
       if (request.method === "GET" && url.pathname === "/discord/bot/heartbeat") return botControl(request, url, env, "heartbeat");
       if (request.method === "GET" && url.pathname === "/discord/bot/offline") return botControl(request, url, env, "offline");
+      if (request.method === "GET" && url.pathname === "/discord/bot/status") return botControl(request, url, env, "status");
+      if (request.method === "POST" && url.pathname === "/discord/bot/reset") return botControl(request, url, env, "reset");
       if (request.method === "GET" && url.pathname === "/discord/bot/inbox") return botInbox(request, url, env);
       if (request.method === "POST" && url.pathname === "/discord/bot/register-command") return registerCommand(request, env);
       if (request.method === "POST" && url.pathname === "/discord/bot/chat") return botChat(request, env);
+      if (request.method === "POST" && url.pathname === "/discord/bot/content-report") return botContentReport(request, env);
       if (request.method === "POST" && url.pathname === "/discord/bot/publish-join") return publishJoinCard(request, url, env);
       return json({ error: "not_found" }, 404);
     } catch (error) {

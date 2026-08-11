@@ -27,6 +27,7 @@ DRP.Incidents.RegisterType("legal_warrant", {
 	transitions = { approval_pending = { active = true } },
 	outcomes = {
 		suspect_arrested = { winner = "instigator", loser = "victim" },
+		rejected = { winner = "victim", loser = "instigator" },
 		default = { winner = "victim", loser = "instigator" }
 	},
 	onParticipantUnavailable = function(incident, ply)
@@ -79,11 +80,27 @@ local function grantPolice(incident, suspect, reason, expires)
 	end
 end
 
-function Legal.RequestWarrant(officer, suspect, reason)
+function Legal.ActiveWarrantFor(suspect)
+	if not IsValid(suspect) then return nil end
+	for _, incident in pairs((DRP.Incidents.ByPlayer and DRP.Incidents.ByPlayer[suspect]) or {}) do
+		if incident.type == "legal_warrant"
+			and (incident.state == "approval_pending" or incident.state == "active") then
+			return incident
+		end
+	end
+end
+
+function Legal.RequestWarrant(officer, suspect, reason, metadata)
 	if not officer:DRPJob().isPolice or not IsValid(suspect) or suspect == officer then return false end
 	reason = string.sub(string.Trim(tostring(reason or "")), 1, 120)
 	if #reason < 5 then DRP.Net.Notify(officer, "A warrant needs a specific reason.", 3) return false end
+	local existing = Legal.ActiveWarrantFor(suspect)
+	if existing then
+		return true, existing, "existing"
+	end
 	local mayor = DRP.Government and DRP.Government.CurrentMayor()
+	local incidentMetadata = istable(metadata) and table.Copy(metadata) or {}
+	incidentMetadata.requested_reason = reason
 	local incident = DRP.Incidents.Create("legal_warrant", {
 		state = IsValid(mayor) and "approval_pending" or "active",
 		reason = "Warrant request: " .. reason,
@@ -91,16 +108,21 @@ function Legal.RequestWarrant(officer, suspect, reason)
 		victim = suspect,
 		deadline = CurTime() + (IsValid(mayor) and 60 or Legal.WarrantDuration),
 		participants = { officer = officer, suspect = suspect },
-		metadata = { requested_reason = reason }
+		metadata = incidentMetadata
 	})
 	if not incident then return false end
+	DRP.Incidents.AddEvidence(incident, "warrant_requested", officer, suspect, reason)
 	if IsValid(mayor) then
 		DRP.Incidents.AddParticipant(incident, "mayor", mayor)
-		DRP.Net.Notify(mayor, officer:DRPName() .. " requested warrant #" .. incident.id .. " for " .. suspect:DRPName() .. ". Use /approvewarrant " .. incident.id .. ".", 2)
+		DRP.Net.Notify(mayor, officer:DRPName() .. " requested warrant #" .. incident.id .. " for " .. suspect:DRPName()
+			.. ". Review it in the Warrants tab, or use /approvewarrant and /rejectwarrant.", 2)
+		DRP.Net.Notify(officer, "Warrant #" .. incident.id .. " was submitted for Mayoral review.", 1)
 	else
 		grantPolice(incident, suspect, reason, incident.deadline)
+		DRP.Net.Notify(officer, "No Mayor is seated. Warrant #" .. incident.id .. " was approved automatically.", 1)
 	end
-	return true
+	hook.Run("DRPWarrantChanged", incident, "requested")
+	return true, incident, IsValid(mayor) and "pending" or "approved"
 end
 
 function Legal.ApproveWarrant(mayor, id)
@@ -113,7 +135,26 @@ function Legal.ApproveWarrant(mayor, id)
 	DRP.Incidents.Transition(incident, "active", "Warrant approved: " .. incident.metadata.requested_reason)
 	DRP.Incidents.SetDeadline(incident, CurTime() + Legal.WarrantDuration, true)
 	grantPolice(incident, suspect, incident.metadata.requested_reason, incident.deadline)
+	DRP.Incidents.AddEvidence(incident, "warrant_approved", mayor, suspect, "Mayoral approval granted")
+	DRP.Net.Notify(mayor, "Warrant #" .. incident.id .. " approved for " .. suspect:DRPName() .. ".", 1)
+	hook.Run("DRPWarrantChanged", incident, "approved")
 	return true
+end
+
+function Legal.RejectWarrant(mayor, id, reason)
+	if mayor ~= DRP.Government.CurrentMayor() then return false end
+	local incident = DRP.Incidents.Get(id)
+	if not incident or incident.type ~= "legal_warrant" or incident.state ~= "approval_pending" then return false end
+	reason = string.sub(string.Trim(tostring(reason or "Mayoral review rejected the request")), 1, 120)
+	incident.suppressProgression = true
+	DRP.Incidents.AddEvidence(incident, "warrant_rejected", mayor, incident.victim, reason, true)
+	local resolved = DRP.Incidents.Resolve(incident, "rejected", reason)
+	if resolved then
+		DRP.Net.Notify(mayor, "Warrant #" .. incident.id .. " rejected.", 1)
+		if IsValid(incident.instigator) then DRP.Net.Notify(incident.instigator, "Warrant #" .. incident.id .. " was rejected: " .. reason, 2) end
+		hook.Run("DRPWarrantChanged", incident, "rejected")
+	end
+	return resolved == true
 end
 
 local preservedWeapons = {
@@ -121,7 +162,8 @@ local preservedWeapons = {
 	weapon_drp_pocket = true,
 	weapon_physgun = true,
 	gmod_tool = true,
-	weapon_drp_mayor_tablet = true
+	weapon_drp_mayor_tablet = true,
+	weapon_drp_police_tablet = true
 }
 
 local function custodyKey(ply)

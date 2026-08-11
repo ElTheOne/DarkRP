@@ -400,6 +400,10 @@ net.Receive("drp_contracts_sync_v1", function()
 	local json = util.Decompress(payload or "")
 	local decoded = json and util.JSONToTable(json)
 	if not istable(decoded) then return end
+	if decoded.delivery and istable(decoded.delivery.position) then
+		local position = decoded.delivery.position
+		decoded.delivery.positionVector = Vector(position.x or 0, position.y or 0, position.z or 0)
+	end
 	UI.State = decoded
 	if shouldOpen then UI.OpenMarketplace() end
 	if pendingEditor then local id = pendingEditor pendingEditor = nil timer.Simple(0, function() UI.OpenEditor(id) end) end
@@ -425,8 +429,8 @@ end)
 hook.Add("HUDPaint", "DRP.Contracts.DeliveryMarker", function()
 	if DRP.UI and DRP.UI.ToolgunFocus and DRP.UI.ToolgunFocus() then return end
 	local delivery = UI.State.delivery
-	if not delivery or not delivery.position then return end
-	local position = Vector(delivery.position.x or 0, delivery.position.y or 0, delivery.position.z or 0)
+	if not delivery or not isvector(delivery.positionVector) then return end
+	local position = delivery.positionVector
 	local screen = position:ToScreen()
 	local distance = math.floor(LocalPlayer():GetPos():Distance(position))
 	local remaining = math.max(0, math.ceil((delivery.expires or 0) - CurTime()))

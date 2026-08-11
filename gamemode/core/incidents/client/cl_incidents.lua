@@ -1,4 +1,8 @@
 local incidents = {}
+-- The police operations tablet consumes the same recipient-filtered incident
+-- records as the Why HUD. This is a client view only; incident authority stays
+-- on the server.
+DRP.ClientIncidents = incidents
 local denial
 local nextRecoveryRequest = 0
 
@@ -356,7 +360,18 @@ local function monitorRecorder()
 	end
 end
 
-timer.Create("DRP.IncidentRecorder.Monitor", 0.25, 0, monitorRecorder)
+local recorderMonitorInterval = 1
+local function recorderMonitorTick()
+	monitorRecorder()
+	local busy = Recorder.Starting or Recorder.Owned or Recorder.External or Recorder.Stopping
+		or Recorder.ManualHold or Recorder.StopAt > 0 or activeCount() > 0
+	local wantedInterval = busy and 0.25 or 1
+	if wantedInterval ~= recorderMonitorInterval then
+		recorderMonitorInterval = wantedInterval
+		timer.Adjust("DRP.IncidentRecorder.Monitor", recorderMonitorInterval, 0, recorderMonitorTick)
+	end
+end
+timer.Create("DRP.IncidentRecorder.Monitor", recorderMonitorInterval, 0, recorderMonitorTick)
 
 concommand.Add("drp_recordincident", function() Recorder.ToggleManual() end)
 concommand.Add("drp_incident_record_status", function()
@@ -438,6 +453,7 @@ local function readFullIncident()
 	end
 	incidents[incident.id] = incident
 	if existing then Recorder.OnIncidentUpdated(incident) else Recorder.OnIncidentStarted(incident) end
+	hook.Run("DRPClientIncidentsChanged", incident.id, existing and "updated" or "started")
 	return incident
 end
 
@@ -449,6 +465,7 @@ net.Receive("drp_incident_sync_v1", function()
 		local resolution = net.ReadString()
 		if incidents[id] then Recorder.OnIncidentResolved(incidents[id], resolution) end
 		incidents[id] = nil
+		hook.Run("DRPClientIncidentsChanged", id, "resolved")
 		denial = { text = "Incident #" .. id .. " ended: " .. resolution, expires = RealTime() + 5, positive = true }
 		return
 	end
@@ -458,6 +475,7 @@ end)
 net.Receive("drp_incident_batch_v1", function()
 	if net.ReadUInt(8) ~= DRP.ProtocolVersion then return end
 	for _ = 1, net.ReadUInt(8) do readFullIncident() end
+	hook.Run("DRPClientIncidentsChanged", 0, "batch")
 end)
 
 net.Receive("drp_incident_delta_v1", function()
@@ -488,6 +506,8 @@ net.Receive("drp_incident_delta_v1", function()
 		end
 		while #incident.evidence > 3 do table.remove(incident.evidence, 1) end
 	end
+	Recorder.OnIncidentUpdated(incident)
+	hook.Run("DRPClientIncidentsChanged", id, "delta")
 end)
 
 concommand.Add("drp_incident_refresh", function()
@@ -516,13 +536,6 @@ net.Receive("drp_incident_denied_v1", function()
 	surface.PlaySound("buttons/button10.wav")
 end)
 
-local function activeList()
-	local list = {}
-	for _, incident in pairs(incidents) do list[#list + 1] = incident end
-	table.sort(list, function(a, b) return a.id < b.id end)
-	return list
-end
-
 local function pretty(value)
 	return string.upper(string.gsub(value or "", "_", " "))
 end
@@ -547,11 +560,59 @@ local function wrapText(text, font, maxWidth, maxLines)
 	return lines
 end
 
+-- Incident text changes only when the server sends an incident delta. Sorting
+-- and word wrapping it in HUDPaint multiplied that work by the client's frame
+-- rate, so cache the complete static layout and keep only countdown text live.
+local renderCache = { dirty = true, width = 0, list = {} }
+
+local function invalidateRenderCache()
+	renderCache.dirty = true
+end
+
+hook.Add("DRPClientIncidentsChanged", "DRP.Incidents.RenderCache", invalidateRenderCache)
+hook.Add("DRPClientScreenSizeChanged", "DRP.Incidents.RenderCache", invalidateRenderCache)
+
+local function rebuildRenderCache(width)
+	local sorted = {}
+	for _, incident in pairs(incidents) do sorted[#sorted + 1] = incident end
+	table.sort(sorted, function(a, b) return a.id < b.id end)
+	local list = {}
+	for index = 1, math.min(#sorted, 3) do
+		local incident = sorted[index]
+		local permissionCount = math.min(#incident.permissions, 3)
+		local evidence = incident.evidence[#incident.evidence]
+		local reasonLines = wrapText(incident.reason, "DRP.Incident.Body", width - 32, 2)
+		local evidenceLines = evidence and wrapText(
+			"EVIDENCE: " .. pretty(evidence.event) .. " — " .. evidence.detail,
+			"DRP.Incident.Small",
+			width - 36,
+			2
+		) or {}
+		list[index] = {
+			incident = incident,
+			permissionCount = permissionCount,
+			reasonLines = reasonLines,
+			evidenceLines = evidenceLines,
+			height = 78 + (#reasonLines * 16) + permissionCount * 17
+				+ (#evidenceLines > 0 and (#evidenceLines * 15 + 3) or 0)
+		}
+	end
+	renderCache.width = width
+	renderCache.list = list
+	renderCache.dirty = false
+	return list
+end
+
 hook.Add("HUDPaint", "DRP.Incidents.Why", function()
 	local colors = DRP.UI and DRP.UI.Colors
 	if not colors then return end
-	local list = activeList()
 	local width = math.min(390, ScrW() - 32)
+	local list
+	if renderCache.dirty or renderCache.width ~= width then
+		list = rebuildRenderCache(width)
+	else
+		list = renderCache.list
+	end
 	local x = ScrW() - width - 18
 	-- Incident context owns the top-right HUD zone. Civic reputation now lives
 	-- below playtime on the left and Admin Mode lives at bottom-center.
@@ -562,14 +623,13 @@ hook.Add("HUDPaint", "DRP.Incidents.Why", function()
 		draw.RoundedBoxEx(7, x + width - 178, y, 4, 32, colors.green, true, false, true, false)
 		draw.SimpleText("WHY?  SAFE MODE", "DRP.Incident.Small", x + width - 164, y + 16, colors.muted, TEXT_ALIGN_LEFT, TEXT_ALIGN_CENTER)
 	else
-		for index = 1, math.min(#list, 3) do
-			local incident = list[index]
-			local lines = math.min(#incident.permissions, 3)
-			local hasEvidence = incident.evidence[#incident.evidence] ~= nil
-			local reasonLines = wrapText(incident.reason, "DRP.Incident.Body", width - 32, 2)
-			local evidence = hasEvidence and incident.evidence[#incident.evidence] or nil
-			local evidenceLines = evidence and wrapText("EVIDENCE: " .. pretty(evidence.event) .. " — " .. evidence.detail, "DRP.Incident.Small", width - 36, 2) or {}
-			local height = 78 + (#reasonLines * 16) + lines * 17 + (#evidenceLines > 0 and (#evidenceLines * 15 + 3) or 0)
+		for index = 1, #list do
+			local cached = list[index]
+			local incident = cached.incident
+			local lines = cached.permissionCount
+			local reasonLines = cached.reasonLines
+			local evidenceLines = cached.evidenceLines
+			local height = cached.height
 			draw.RoundedBox(8, x, y, width, height, Color(12, 16, 24, 232))
 			draw.RoundedBoxEx(8, x, y, 5, height, colors.accent, true, false, true, false)
 			draw.SimpleText("WHY?  INCIDENT #" .. incident.id .. " — " .. pretty(incident.type), "DRP.Incident.Title", x + 16, y + 17, color_white, TEXT_ALIGN_LEFT, TEXT_ALIGN_CENTER)

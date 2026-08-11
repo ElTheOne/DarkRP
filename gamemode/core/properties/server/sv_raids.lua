@@ -58,6 +58,9 @@ function Properties:DeclareRaid(attacker, propertyID)
 	if not incident then return false end
 	incident.raidDefences = defences
 	self.ActiveRaids[propertyID] = incident.id
+	if self.ClearTrespassProperty then
+		self:ClearTrespassProperty(propertyID, "raid_declared", "Declared raid rules now control property combat")
+	end
 	lease.raid_cooldown_unix = now + self.RaidCooldown
 	self.PlayerRaidCooldowns[attacker:SteamID64()] = now + self.RaidCooldown
 	self:Save()

@@ -124,6 +124,10 @@ function Service.Spawn(ply, key)
 		DRP.Net.Notify(ply, "A Treasury Vault already exists. Move or persist the existing vault instead.", 3)
 		return false
 	end
+	if definition.class == "drp_councilman" and #ents.FindByClass("drp_councilman") > 0 then
+		DRP.Net.Notify(ply, "A Councilman already exists. Move or persist the existing Councilman instead.", 3)
+		return false
+	end
 	if (definition.class == "drp_salvage_dumpster" or definition.class == "drp_salvage_trashcan") and DRP.Salvage then
 		local allowedCount, limit = DRP.Salvage:CanRegisterClass(definition.class)
 		if not allowedCount then DRP.Net.Notify(ply, "The map limit of " .. limit .. " salvage containers has been reached.", 3) return false end
@@ -146,6 +150,13 @@ function Service.Spawn(ply, key)
 	if not trace then
 		DRP.Net.Notify(ply, traceReason, 3)
 		return false
+	end
+	if DRP.Properties and DRP.Properties.ValidateSpawnPoint then
+		local permitted, _, reason = DRP.Properties:ValidateSpawnPoint(ply, trace.HitPos)
+		if not permitted then
+			DRP.Net.Notify(ply, reason or "Entities can only be spawned inside an authorised property build zone.", 3)
+			return false
+		end
 	end
 	local free = DRP.Experience and DRP.Experience:CanPayForItem(ply, "job_entity", definition.key)
 	local price = free == true and 0 or definition.price
@@ -176,6 +187,7 @@ function Service.Spawn(ply, key)
 		entityModel = DRP.WeaponCaseFallbackModel
 	end
 	entity:SetModel(entityModel)
+	entity:SetAngles(Angle(0, ply:EyeAngles().y, 0))
 	entity:SetPos(spawnPositionFor(entity, trace))
 	entity:Spawn()
 	entity:Activate()
@@ -183,6 +195,18 @@ function Service.Spawn(ply, key)
 		if price > 0 then DRP.Economy.Add(ply, price, definition.name .. " spawn refund") end
 		DRP.Net.Notify(ply, definition.name .. " was rejected while spawning; your purchase was refunded.", 3)
 		return false
+	end
+	local placementPropertyID
+	if DRP.Properties and DRP.Properties.ValidateSpawnedEntityPlacement then
+		local permitted, propertyID, reason = DRP.Properties:ValidateSpawnedEntityPlacement(ply, entity, "build")
+		if not permitted then
+			entity:Remove()
+			if price > 0 then DRP.Economy.Add(ply, price, definition.name .. " placement refund") end
+			DRP.Net.Notify(ply, reason or "The complete entity must remain inside the combined authorised build zones.", 3)
+			return false
+		end
+		placementPropertyID = propertyID
+		if propertyID then entity.DRPPropertyID = propertyID end
 	end
 	if definition.mediaPlayer and DRP.MediaPlayerIntegration then
 		DRP.MediaPlayerIntegration:Claim(entity, ply)
@@ -229,11 +253,11 @@ function Service.Spawn(ply, key)
 		end
 	end
 	if definition.class == "drp_crafting_table" and DRP.Properties then
-		local permitted, propertyID, reason = DRP.Properties:ValidateEntityPlacement(ply, entity, "build")
-		if not permitted or not propertyID or not DRP.Properties.Can(ply, propertyID, "crafting") then
+		local propertyID = placementPropertyID or entity.DRPPropertyID
+		if not propertyID or not DRP.Properties.Can(ply, propertyID, "crafting") then
 			entity:Remove()
 			if price > 0 then DRP.Economy.Add(ply, price, definition.name .. " placement refund") end
-			DRP.Net.Notify(ply, reason or "Place this table fully inside a property where you have crafting permission.", 3)
+			DRP.Net.Notify(ply, "Place this table fully inside a property where you have crafting permission.", 3)
 			return false
 		end
 		entity.DRPPropertyID = propertyID
@@ -246,7 +270,25 @@ function Service.Spawn(ply, key)
 		end
 		-- The production budget registers before the property association. A
 		-- crafting table is persistent infrastructure, not a temporary drop.
-		entity.DRPCleanupRecord = nil
+		if DRP.Props and DRP.Props.CancelCleanup then DRP.Props:CancelCleanup(entity) end
+	end
+	if definition.class == "drp_spawn_bed" then
+		local propertyID = placementPropertyID or entity.DRPPropertyID
+		if not propertyID then
+			entity:Remove()
+			if price > 0 then DRP.Economy.Add(ply, price, definition.name .. " placement refund") end
+			DRP.Net.Notify(ply, "Place the complete bed inside a property build zone.", 3)
+			return false
+		end
+		entity.DRPPropertyID = propertyID
+		local registered, registerReason = DRP.Beds and DRP.Beds:RegisterEntity(entity, ply, propertyID)
+		if not registered then
+			entity:Remove()
+			if price > 0 then DRP.Economy.Add(ply, price, definition.name .. " registration refund") end
+			DRP.Net.Notify(ply, registerReason or "The bed could not be registered.", 3)
+			return false
+		end
+		if DRP.Props and DRP.Props.CancelCleanup then DRP.Props:CancelCleanup(entity) end
 	end
 	if definition.drug and DRP.Roles then DRP.Roles:Record(ply, "narcotics", 1, "drug distribution activity") end
 	if DRP.Audit then
@@ -333,19 +375,25 @@ function Service.Use(entity, ply)
 	elseif class == "drp_tip_jar" then
 		local owner = DRP.Props.Owner(entity)
 		if not IsValid(owner) or owner == ply then return end
-		if DRP.Economy.Take(ply, 10, "tip") then DRP.Economy.Add(owner, 10, ply:DRPName() .. " tipped your jar") end
+		DRP.Economy.Transfer(ply, owner, 10, "tip")
 	elseif class == "drp_drug" then
 		if DRP.Drugs and DRP.Drugs.Ingest(ply, entity:GetNW2String("DRPDrug", ""), nil, false) then entity:Remove() end
 	elseif class == "drp_jailer" then
 		if DRP.Legal then DRP.Legal.BookAtJailer(ply, entity) end
+	elseif class == "drp_councilman" then
+		if DRP.Identity then DRP.Identity:Open(ply, entity) end
 	elseif class == "drp_police_armory" then
 		if DRP.Armory then DRP.Armory:Use(ply, entity) end
 	elseif class == "drp_treasury_vault" then
 		if DRP.Treasury then DRP.Treasury:Use(ply, entity) end
+	elseif class == "drp_atm" then
+		if DRP.Bonds then DRP.Bonds:Use(ply, entity) end
 	elseif class == "drp_salvage_dumpster" or class == "drp_salvage_trashcan" then
 		if DRP.Salvage then DRP.Salvage:Open(ply, entity) end
 	elseif class == "drp_crafting_table" then
 		if DRP.Crafting then DRP.Crafting:Use(entity, ply) end
+	elseif class == "drp_spawn_bed" then
+		if DRP.Beds then DRP.Beds:Use(ply, entity) end
 	elseif entity:GetNW2Bool("DRPEvidenceLocker", false) then
 		if not ply:DRPJob().isPolice and (not DRP.Admin or not DRP.Admin.Has(ply, "logs")) then return end
 		local latest = Service.Evidence[#Service.Evidence]

@@ -279,16 +279,29 @@ local function openAdminPanel(entries, canConfigureRanks, rankMasks, punishments
 	local canViewManagement = hasPermission("panel")
 	local canUseInteractions = hasPermission("server_interactions")
 	if IsValid(adminFrame) then adminFrame:Remove() end
-	local frame = modernFrame("User Management", 1060, 680)
+	local frame = modernFrame("User Management", ScrW(), ScrH())
+	frame:SetSize(ScrW(), ScrH())
+	frame:SetPos(0, 0)
+	frame:SetDraggable(false)
+	if IsValid(frame.DRPCloseButton) then frame.DRPCloseButton:SetPos(frame:GetWide() - 50, 13) end
 	adminFrame = frame
 	frame:SetKeyboardInputEnabled(true)
 	frame:SetMouseInputEnabled(true)
 	frame.OnRemove = function() if adminFrame == frame then adminFrame = nil end end
 
-	local tabs = vgui.Create("DPanel", frame)
+	-- The management surface now has enough sections that fixed Dock(LEFT)
+	-- buttons become unreachable on narrower resolutions. DHorizontalScroller
+	-- keeps one compact navigation rail with arrows and mouse-wheel scrolling.
+	local tabs = vgui.Create("DHorizontalScroller", frame)
 	tabs:SetPos(14, 70)
 	tabs:SetSize(frame:GetWide() - 28, 42)
-	tabs.Paint = nil
+	tabs:SetOverlap(-8)
+	tabs.Paint = function(_, width, height) draw.RoundedBox(6, 0, 0, width, height, colors.background) end
+	tabs.OnMouseWheeled = function(self, delta)
+		self.OffsetX = math.max(0, (self.OffsetX or 0) - delta * 120)
+		self:InvalidateLayout(true)
+		return true
+	end
 
 	local sidebar = vgui.Create("DPanel", frame)
 	sidebar:SetPos(14, 120)
@@ -308,12 +321,22 @@ local function openAdminPanel(entries, canConfigureRanks, rankMasks, punishments
 	local interactionsTab
 	local healthTab
 	local economyTab
+	local databaseTab
+	local canUseDatabase = DRP.AdminRankLevel(DRP.ClientAdminBaseRank) >= DRP.AdminRankLevel("headadmin")
 
 	local function paintTab(button, page)
 		button.Paint = function(self, width, height)
 			local active = activePage == page
 			draw.RoundedBox(6, 0, 0, width, height, active and colors.accent or (self:IsHovered() and colors.panelHover or colors.panel))
 		end
+	end
+
+	local function addTopTab(label, width, page, callback)
+		local button = modernButton(tabs, label, colors.accent, callback)
+		button:SetSize(width, 42)
+		paintTab(button, page)
+		tabs:AddPanel(button)
+		return button
 	end
 
 	local function showUser(entry)
@@ -571,6 +594,14 @@ local function openAdminPanel(entries, canConfigureRanks, rankMasks, punishments
 		addInfoLabel(body, entry.discordVerified and "Discord: live role verified"
 			or (entry.discordLinked and "Discord: linked; live role checked when Trusted is granted"
 			or "Discord: live role check required for Trusted"), entry.discordVerified and colors.green or colors.muted)
+		if hasPermission("props") and DRP.AdminEntities and DRP.AdminEntities.Open then
+			local inspectEntities = modernButton(body, "View and manage spawned entities", colors.accent, function()
+				DRP.AdminEntities.Open(entry.steamID64, entry.name)
+			end)
+			inspectEntities:Dock(TOP)
+			inspectEntities:DockMargin(18, 8, 18, 4)
+			inspectEntities:SetTall(38)
+		end
 		if hasPermission("trust") then
 			local inspectTrust = modernButton(body, "Inspect trust evidence", colors.accent, function()
 				if DRP.TrustUI and DRP.TrustUI.Request then DRP.TrustUI.Request(entry.steamID64) end
@@ -714,6 +745,7 @@ local function openAdminPanel(entries, canConfigureRanks, rankMasks, punishments
 	end
 
 	local function showUsersPage()
+		content.DRPDatabaseActive = false
 		activePage = "users"
 		adminPreferredPage = "users"
 		selected = nil
@@ -751,6 +783,7 @@ local function openAdminPanel(entries, canConfigureRanks, rankMasks, punishments
 
 	local function showRankPermissionsPage()
 		if not canConfigureRanks then return end
+		content.DRPDatabaseActive = false
 		activePage = "ranks"
 		adminPreferredPage = "ranks"
 		selected = nil
@@ -818,6 +851,7 @@ local function openAdminPanel(entries, canConfigureRanks, rankMasks, punishments
 
 	local function showPunishmentsPage()
 		if not canViewManagement then return end
+		content.DRPDatabaseActive = false
 		activePage = "punishments"
 		adminPreferredPage = "punishments"
 		selected = nil
@@ -978,6 +1012,7 @@ local function openAdminPanel(entries, canConfigureRanks, rankMasks, punishments
 
 	local function showServerInteractionsPage()
 		if not canUseInteractions then return end
+		content.DRPDatabaseActive = false
 		activePage = "interactions"
 		adminPreferredPage = "interactions"
 		selected = nil
@@ -1093,6 +1128,7 @@ local function openAdminPanel(entries, canConfigureRanks, rankMasks, punishments
 
 	local function showServerHealthPage()
 		if not canUseInteractions then return end
+		content.DRPDatabaseActive = false
 		activePage = "health"
 		adminPreferredPage = "health"
 		selected = nil
@@ -1162,6 +1198,7 @@ local function openAdminPanel(entries, canConfigureRanks, rankMasks, punishments
 
 	local function showEconomyHealthPage()
 		if not canUseInteractions then return end
+		content.DRPDatabaseActive = false
 		activePage = "economy"
 		adminPreferredPage = "economy"
 		selected = nil
@@ -1189,7 +1226,9 @@ local function openAdminPanel(entries, canConfigureRanks, rankMasks, punishments
 			overview:DockMargin(18, 14, 18, 4)
 			addInfoLabel(content, string.format("Exact money $%s   •   Online $%s   •   Effective $%s", string.Comma(snapshot.exactMoney or 0), string.Comma(snapshot.onlineMoney or 0), string.Comma(snapshot.effectiveMoney or 0)), color_white)
 			addInfoLabel(content, string.format("Treasury $%s   •   Dormant cash $%s   •   Median wallet $%s   •   Richest %s ($%s)", string.Comma(snapshot.treasury or 0), string.Comma(snapshot.dormantCash or 0), string.Comma(snapshot.medianWallet or 0), tostring(snapshot.richestName or "Unknown"), string.Comma(snapshot.richestWallet or 0)))
-			addInfoLabel(content, string.format("Supply value $%s   •   Wallet Gini %.2f   •   1h mint $%s   •   1h burn $%s   •   Net $%s",string.Comma(snapshot.supplyValue or 0),tonumber(snapshot.walletGini) or 0,string.Comma(snapshot.hourlyMint or 0),string.Comma(snapshot.hourlyBurn or 0),string.Comma(snapshot.netHourlyMoney or 0)))
+			addInfoLabel(content, string.format("Municipal bonds %s   •   Principal $%s   •   Promised $%s   •   Debt $%s   •   Deficit $%s   •   Issue cap $%s", snapshot.bondIssuance and "OPEN" or "CLOSED", string.Comma(snapshot.bondPrincipal or 0), string.Comma(snapshot.bondLiability or 0), string.Comma(snapshot.bondDebt or 0), string.Comma(snapshot.bondDeficit or 0), string.Comma(snapshot.bondGlobalCap or 0)), (snapshot.bondDeficit or 0) > 0 and colors.red or colors.accent)
+			addInfoLabel(content, string.format("Managed supply $%s / $%s target   •   Money pressure %.2fx   •   Asset pressure %.2fx   •   Burn %.2f%%",string.Comma(snapshot.managedSupplyValue or 0),string.Comma(snapshot.targetSupplyValue or 0),tonumber(snapshot.moneyRatio) or 0,tonumber(snapshot.assetRatio) or 0,(tonumber(snapshot.transactionBurnRate) or 0)*100))
+			addInfoLabel(content, string.format("Wallet Gini %.2f   •   1h mint $%s   •   1h burn $%s   •   Net $%s",tonumber(snapshot.walletGini) or 0,string.Comma(snapshot.hourlyMint or 0),string.Comma(snapshot.hourlyBurn or 0),string.Comma(snapshot.netHourlyMoney or 0)))
 			addInfoLabel(content, string.format("Revision %s   •   Mode %s   •   Journal %s bytes   •   Database %s", tostring(snapshot.revision or 0), tostring(snapshot.mode or "unknown"), string.Comma(snapshot.journalBytes or 0), snapshot.database and "ONLINE" or "OFFLINE"), snapshot.database and colors.green or colors.red)
 			local warningTitle = sectionLabel(content, "Warnings")
 			warningTitle:Dock(TOP)
@@ -1228,42 +1267,32 @@ local function openAdminPanel(entries, canConfigureRanks, rankMasks, punishments
 		net.SendToServer()
 	end
 
+	local function showDatabasePage()
+		if not canUseDatabase or not DRP.AdminDatabaseUI then return end
+		activePage = "database"
+		adminPreferredPage = "database"
+		selected = nil
+		sidebar:Clear()
+		content:Clear()
+		DRP.AdminDatabaseUI.Show(sidebar, content)
+	end
+
 	if canViewManagement then
-		usersTab = modernButton(tabs, "Users", colors.accent, showUsersPage)
-		usersTab:Dock(LEFT)
-		usersTab:SetWide(150)
-		paintTab(usersTab, "users")
-		punishmentsTab = modernButton(tabs, "Warnings & Blacklists", colors.accent, showPunishmentsPage)
-		punishmentsTab:Dock(LEFT)
-		punishmentsTab:DockMargin(8, 0, 0, 0)
-		punishmentsTab:SetWide(220)
-		paintTab(punishmentsTab, "punishments")
+		usersTab = addTopTab("Users", 150, "users", showUsersPage)
+		punishmentsTab = addTopTab("Warnings & Blacklists", 220, "punishments", showPunishmentsPage)
 	end
 	if canViewManagement and canConfigureRanks then
-		ranksTab = modernButton(tabs, "Rank Permissions", colors.accent, showRankPermissionsPage)
-		ranksTab:Dock(LEFT)
-		ranksTab:DockMargin(8, 0, 0, 0)
-		ranksTab:SetWide(190)
-		paintTab(ranksTab, "ranks")
+		ranksTab = addTopTab("Rank Permissions", 190, "ranks", showRankPermissionsPage)
 	end
 	if canUseInteractions then
-		interactionsTab = modernButton(tabs, "Server Interactions", colors.accent, showServerInteractionsPage)
-		interactionsTab:Dock(LEFT)
-		interactionsTab:DockMargin(8, 0, 0, 0)
-		interactionsTab:SetWide(190)
-		paintTab(interactionsTab, "interactions")
-		healthTab = modernButton(tabs, "Server Health", colors.accent, showServerHealthPage)
-		healthTab:Dock(LEFT)
-		healthTab:DockMargin(8, 0, 0, 0)
-		healthTab:SetWide(145)
-		paintTab(healthTab, "health")
-		economyTab = modernButton(tabs, "Economy Health", colors.accent, showEconomyHealthPage)
-		economyTab:Dock(LEFT)
-		economyTab:DockMargin(8, 0, 0, 0)
-		economyTab:SetWide(155)
-		paintTab(economyTab, "economy")
+		interactionsTab = addTopTab("Server Interactions", 190, "interactions", showServerInteractionsPage)
+		healthTab = addTopTab("Server Health", 145, "health", showServerHealthPage)
+		economyTab = addTopTab("Economy Health", 155, "economy", showEconomyHealthPage)
 	end
-	if adminPreferredPage == "economy" and canUseInteractions then
+	if canUseDatabase then databaseTab = addTopTab("Database", 140, "database", showDatabasePage) end
+	if adminPreferredPage == "database" and canUseDatabase then
+		showDatabasePage()
+	elseif adminPreferredPage == "economy" and canUseInteractions then
 		showEconomyHealthPage()
 	elseif adminPreferredPage == "health" and canUseInteractions then
 		showServerHealthPage()

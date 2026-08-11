@@ -32,6 +32,7 @@ DRP.DropPolicy = {
 		weapon_drp_gag = true,
 		ephone = true,
 		weapon_drp_mayor_tablet = true,
+		weapon_drp_police_tablet = true,
 		gmod_tool = true,
 		weapon_drp_persistence_tool = true
 	},
@@ -71,16 +72,80 @@ if CLIENT then
 	include("core/toolgun/stacker/vgui/stackerpreseteditor.lua")
 end
 
-DRP.Toolgun.BeginBundledSource("drp_property_zone")
-include("core/toolgun/stools/drp_property_zone.lua")
-DRP.Toolgun.FinishBundledSource("drp_property_zone")
+-- Capture stool source while the root gamemode file still owns a valid
+-- gamemode-relative include context. Sandbox's gmod_tool may not exist yet;
+-- DRP.Toolgun holds plain definitions until it can promote them later.
+local bundledToolSources = {
+	{ "drp_property_zone", "core/toolgun/stools/drp_property_zone.lua" },
+	{ "drp_police_route", "core/toolgun/stools/drp_police_route.lua" },
+	{ "precision", "core/toolgun/stools/precision.lua" },
+	{ "stacker_improved", "core/toolgun/stools/stacker_improved.lua" }
+}
 
-DRP.Toolgun.BeginBundledSource("precision")
-include("core/toolgun/stools/precision.lua")
-DRP.Toolgun.FinishBundledSource("precision")
+-- Publish the exact sources from the same bootstrap which includes them. This
+-- deliberately duplicates the manifest's AddCSLuaFile declaration so an older
+-- init.lua or a partially uploaded manifest cannot leave joining clients with
+-- shared.lua but without one of its bundled stools.
+if SERVER then
+	for index = 1, #bundledToolSources do
+		AddCSLuaFile(bundledToolSources[index][2])
+	end
+end
 
-DRP.Toolgun.BeginBundledSource("stacker_improved")
-include("core/toolgun/stools/stacker_improved.lua")
-DRP.Toolgun.FinishBundledSource("stacker_improved")
+local failedBundledTools = {}
 
-DRP.Toolgun.RegisterBundledTools()
+local function loadBundledToolSources()
+	for index = 1, #bundledToolSources do
+		local mode, path = unpack(bundledToolSources[index])
+		if not failedBundledTools[mode] and not DRP.Toolgun.HasBundledSource(mode) then
+			-- include() resolves this path relative to the active gamemode. Do not
+			-- preflight it through file.Exists(..., "LUA"): that realm is rooted at
+			-- lua/ and can falsely report valid gamemode-relative files as absent.
+			local ok, failure = xpcall(function()
+				DRP.Toolgun.BeginBundledSource(mode)
+				include(path)
+				DRP.Toolgun.FinishBundledSource(mode)
+			end, debug.traceback)
+
+			if not ok then
+				DRP.Toolgun.AbortBundledSource(mode)
+				failedBundledTools[mode] = true
+				ErrorNoHalt("[DRP TOOLGUN] Failed to register " .. mode .. ":\n" .. tostring(failure) .. "\n")
+			end
+		end
+	end
+
+	return DRP.Toolgun.RegisterBundledTools()
+end
+
+DRP.Toolgun.LoadBundledSources = loadBundledToolSources
+
+function DRP.Toolgun.RetryBundledSources()
+	-- Includes are intentionally never attempted here: delayed callbacks have no
+	-- reliable gamemode-relative path context. This is only a promotion/sync
+	-- recovery point for definitions captured during shared.lua execution.
+	return DRP.Toolgun.RegisterBundledTools()
+end
+
+local function scheduleBundledToolSources()
+	if DRP.Toolgun.RegisterBundledTools() then return end
+	timer.Create("DRP.WaitForSandboxToolgun", 0.1, 50, function()
+		if DRP.Toolgun.RegisterBundledTools() then
+			timer.Remove("DRP.WaitForSandboxToolgun")
+		end
+	end)
+end
+
+hook.Add("Initialize", "DRPLoadBundledToolSources", function()
+	-- Run after the current Initialize dispatch so other scripted-weapon setup
+	-- in the same phase has completed on both server and client.
+	timer.Simple(0, scheduleBundledToolSources)
+end)
+
+hook.Add("OnReloaded", "DRPReloadBundledToolSources", function()
+	timer.Simple(0, scheduleBundledToolSources)
+end)
+
+-- This call must remain synchronous at the gamemode root. It captures every
+-- stool now and only defers promotion into Sandbox's Tool table.
+loadBundledToolSources()

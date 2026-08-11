@@ -96,6 +96,7 @@ function Props:Stop()
 	self.Stopping = true
 	self.ActiveZonePhysgun = setmetatable({}, { __mode = "k" })
 	self.NextZonePhysgunCheck = 0
+	for ent in pairs(self.CleanupRecords or {}) do self:CancelCleanup(ent) end
 	if self.DisarmZonePhysgunValidation then self:DisarmZonePhysgunValidation() end
 	timer.Remove("DRP.Props.CatalogScan")
 	timer.Remove("DRP.Props.CatalogTransfer")

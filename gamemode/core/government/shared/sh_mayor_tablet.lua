@@ -24,6 +24,31 @@ local definition = {
 	ViewModel = Model("models/zerochain/props_weedfarm/zwf_tablet_vm.mdl"),
 	WorldModel = Model("models/zerochain/props_weedfarm/zwf_tablet.mdl"),
 	DRPTabletHardware = true,
+	DRPTabletInterface = "MayorTablet",
+	DRPTabletView = {
+		-- These values are starting transforms. The ePhone renderer projects the
+		-- resulting tablet bounds and corrects them against each client's viewport.
+		idleUp = 10.5,
+		focusedUp = 10.5,
+		idleRight = 0,
+		focusedRight = 0,
+		idleBack = 0,
+		focusedBack = 0.75,
+		-- The focused tablet starts square to the camera. The client fitter then
+		-- removes any residual roll introduced by the animated tablet bone.
+		focusedPitch = 0,
+		focusedRoll = 0,
+		focusedFOV = 60,
+		directCameraAnchor = false,
+		autoFit = false,
+		viewportMarginX = 0.025,
+		viewportMarginY = 0.035,
+		-- Deliberately larger than the visible glass-to-frame gap so the physical
+		-- casing, not merely the rendered UI, remains within the safe rectangle.
+		bezelAllowanceX = 0.11,
+		bezelAllowanceY = 0.12,
+		fitPositionResponse = 1
+	},
 	DRPTabletScreen = {
 		-- These are tablet_main bone-local coordinates. Following the animated
 		-- bone keeps the interface attached during both draw and idle sequences.
@@ -35,8 +60,11 @@ local definition = {
 		normal = Vector(0, 0, 1),
 		scale = 0.01285,
 		surfaceOffset = 0.06,
-		canvasWidth = 970,
-		canvasHeight = 725
+		-- Calibrated to the usable glass rather than the former inset phone-like
+		-- rectangle. Changing canvas dimensions expands the rendered surface on
+		-- each axis without stretching the UI or breaking cursor coordinates.
+		canvasWidth = 1080,
+		canvasHeight = 760
 	},
 	DRPPhoneDeviceContext = "mayor_tablet",
 
@@ -76,6 +104,10 @@ if CLIENT then
 	-- with only ephone/shared.lua and a dead baked tablet display.
 	function definition:PostDrawViewModel(...)
 		return callEPhone("PostDrawViewModel", self, ...)
+	end
+
+	function definition:PreDrawViewModel(...)
+		return callEPhone("PreDrawViewModel", self, ...)
 	end
 
 	function definition:GetViewModelPosition(...)

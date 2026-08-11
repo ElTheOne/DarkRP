@@ -57,9 +57,31 @@ function Hints:CivicGuidance(ply, force)
 	return self:Send(ply, "civic_guidance_" .. target, title, description, kind, 7, force)
 end
 
+local function muggingHintKey(ply)
+	return "hint:mugging:" .. (IsValid(ply) and ply:SteamID64() or "invalid")
+end
+
+function Hints:ScheduleMugging(ply, expectedJob)
+	if not ready(ply) then return false end
+	local key = muggingHintKey(ply)
+	DRP.Deadlines.Cancel(key)
+	local job = ply.DRPJob and ply:DRPJob() or nil
+	if not istable(job) or job.isGovernment or not ply:DRPHasRoleCapability("canMug") then return false end
+	expectedJob = math.floor(tonumber(expectedJob) or ply:DRPJobID())
+	DRP.Deadlines.Schedule(key, CurTime() + 20, function()
+		if not ready(ply) then return end
+		local current = ply.DRPJob and ply:DRPJob() or nil
+		if not istable(current) or ply:DRPJobID() ~= expectedJob or current.isGovernment or not ply:DRPHasRoleCapability("canMug") then return end
+		Hints:Send(ply, "criminal_mugging_controls", "Mugging is available",
+			"Aim at a stationary player and tap M to demand your saved amount. Hold M for three seconds to choose and issue a new demand.", 2, 7)
+	end)
+	return true
+end
+
 function Hints:Start()
 	hook.Add("DRPPlayerReady", "DRP.Hints.Beginner", function(ply)
 		if not ready(ply) then return end
+		Hints:ScheduleMugging(ply)
 		local newPlayer = math.max(0, tonumber(ply.DRPTotalPlaytimeBase) or 0) < 7200
 		if not newPlayer then return end
 		timer.Simple(5, function()
@@ -72,7 +94,11 @@ function Hints:Start()
 		end)
 		timer.Simple(32, function() Hints:CivicGuidance(ply) end)
 	end)
-	hook.Add("PlayerDisconnected", "DRP.Hints.Disconnect", function(ply) Hints.Cooldowns[ply] = nil end)
+	hook.Add("DRPJobChanged", "DRP.Hints.MuggingRole", function(ply, _, current) Hints:ScheduleMugging(ply, current) end)
+	hook.Add("PlayerDisconnected", "DRP.Hints.Disconnect", function(ply)
+		Hints.Cooldowns[ply] = nil
+		DRP.Deadlines.Cancel(muggingHintKey(ply))
+	end)
 	hook.Add("DRPCivicStandingChanged", "DRP.Hints.CivicProgress", function(ply)
 		if ready(ply) and (tonumber(ply.DRPRoleGoalValue) or 0) > 0 then Hints:CivicGuidance(ply, false) end
 	end)
@@ -88,6 +114,7 @@ end
 
 function Hints:Stop()
 	hook.Remove("DRPPlayerReady", "DRP.Hints.Beginner")
+	hook.Remove("DRPJobChanged", "DRP.Hints.MuggingRole")
 	hook.Remove("PlayerDisconnected", "DRP.Hints.Disconnect")
 	hook.Remove("DRPCivicStandingChanged", "DRP.Hints.CivicProgress")
 	timer.Remove("DRP.Hints.RoleGuidance")

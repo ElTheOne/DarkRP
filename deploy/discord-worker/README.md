@@ -97,6 +97,7 @@ To relay in-game global chat, set these values under `discord` in
 
 ```json
 "bot_chat_url": "https://darkrp-discord-link.tcv2y2cdj7.workers.dev/discord/bot/chat",
+"bot_content_report_url": "https://darkrp-discord-link.tcv2y2cdj7.workers.dev/discord/bot/content-report",
 "bot_inbox_url": "https://darkrp-discord-link.tcv2y2cdj7.workers.dev/discord/bot/inbox?channel_id={channel_id}",
 "global_chat_channel_id": "YOUR_DISCORD_TEXT_CHANNEL_ID"
 ```
@@ -105,6 +106,14 @@ Only the global category is relayed. The Worker
 serializes outgoing messages through the live bot object, suppresses Discord
 mentions, ignores bot and webhook messages on the return path, and keeps a
 bounded inbox that the game server polls once every two seconds.
+
+Clients also perform a bounded content audit after joining and when model
+entities are created. Confirmed missing required packs, invalid models and error
+materials are submitted as structured issue codes to the game server. The
+server validates, rate-limits and deduplicates them before the Worker posts a
+recovery guide to the configured global chat channel. Clients cannot provide
+the Discord message body. If `bot_content_report_url` is omitted, the server
+derives it automatically from `bot_chat_url`.
 
 ## Live join card
 

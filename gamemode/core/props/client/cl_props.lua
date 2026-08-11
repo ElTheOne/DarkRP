@@ -87,6 +87,7 @@ local roleSelectableWeapons = {
 	weapon_drp_kidnap_baton = "canKidnap",
 	weapon_drp_blindfold = "canKidnap",
 	weapon_drp_gag = "canKidnap",
+	weapon_drp_police_tablet = "canUsePoliceOperationsTablet",
 	weapon_drp_mayor_tablet = "canUsePoliceTablet"
 }
 
@@ -226,7 +227,7 @@ local function toolCatalog()
 	local function addTool(mode, tool, category)
 		mode = string.lower(string.Trim(tostring(mode or "")))
 		if mode == "" or seen[mode] then return end
-		if mode == "drp_property_zone"
+		if (mode == "drp_property_zone" or mode == "drp_police_route")
 			and not isClientOwner()
 			and DRP.AdminRankLevel(clientRank()) < DRP.AdminRankLevel("headadmin") then return end
 		tool = istable(tool) and tool or {}
@@ -253,6 +254,8 @@ local function toolCatalog()
 	end
 	DRP.AllowedToolModes.drp_property_zone = true
 	addTool("drp_property_zone", { Name = "Property Build Zones", Icon = "icon16/shape_handles.png" }, "DarkRP Server")
+	DRP.AllowedToolModes.drp_police_route = true
+	addTool("drp_police_route", { Name = "Police Patrol Routes", Icon = "icon16/vector.png" }, "DarkRP Server")
 
 	-- The live weapon contains initialized tool objects and is the most
 	-- dependable registry after the player has received their loadout.
@@ -343,6 +346,7 @@ local blockedPrestigeWeapons = {
 	weapon_medkit = true,
 	ephone = true,
 	weapon_drp_mayor_tablet = true,
+	weapon_drp_police_tablet = true,
 	weapon_drp_persistence_tool = true
 }
 
@@ -425,6 +429,12 @@ local function buildAdminCatalogs()
 	addWeapon("weapon_drp_mayor_tablet", {
 		ClassName = "weapon_drp_mayor_tablet",
 		PrintName = "Mayoral Records Tablet",
+		Category = "Government Utilities",
+		IconOverride = "entities/ephone.png"
+	})
+	addWeapon("weapon_drp_police_tablet", {
+		ClassName = "weapon_drp_police_tablet",
+		PrintName = "Police Operations Tablet",
 		Category = "Government Utilities",
 		IconOverride = "entities/ephone.png"
 	})

@@ -45,6 +45,11 @@ end
 
 function Incidents.AwardOutcomeXP(incident, outcome)
 	if not istable(incident) or not istable(outcome) or incident.xpOutcomeAwarded then return false end
+	local definition = Incidents.Definitions[tostring(incident.type or "")] or {}
+	if definition.progression == false or incident.suppressProgression == true then
+		incident.xpOutcomeAwarded = true
+		return false
+	end
 	if not DRP.Experience or not isfunction(DRP.Experience.Add) then return false end
 	local awarded = false
 	local function grant(ply, amount, role)

@@ -34,7 +34,13 @@ end
 function Government.SetTreasury(value, reason, immediateSync)
 	local previous = Government.GetTreasury()
 	local updated = cleanMoney(value)
-	if previous == updated then return false, updated end
+	local debtServiced = 0
+	if updated > previous and DRP.Bonds and DRP.Bonds.ApplyTreasuryIncrease then
+		local spendable, absorbed = DRP.Bonds:ApplyTreasuryIncrease(updated - previous, reason)
+		debtServiced = absorbed or 0
+		updated = cleanMoney(previous + spendable)
+	end
+	if previous == updated then return debtServiced > 0, updated end
 	Government.Treasury = updated
 	Government.QueueSave()
 	if immediateSync then Government.Sync() else Government.QueueSync() end
@@ -200,7 +206,8 @@ function Government.ProcessSalary(ply, job)
 	local ordinaryGross = base + bonus
 	local gross = DRP.Supporter and DRP.Supporter.ApplyReward(ply, ordinaryGross) or ordinaryGross
 	local tax = math.min(gross, math.floor(gross * Government.TaxRate / 100))
-	if bonus > 0 or tax > 0 then Government.SetTreasury(Government.Treasury - bonus + tax, "salary funding and tax", false) end
+	if bonus > 0 then Government.WithdrawTreasury(bonus, "salary funding", false) end
+	if tax > 0 then Government.DepositTreasury(tax, "salary tax", false) end
 	return gross - tax, tax, bonus
 end
 

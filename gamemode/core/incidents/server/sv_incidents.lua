@@ -896,6 +896,8 @@ function Incidents.Resolve(incident, resolution, detail)
 		state = incident.state,
 		reason = incident.reason,
 		resolution = resolution,
+		progression = (Incidents.Definitions[incident.type] or {}).progression ~= false
+			and incident.suppressProgression ~= true,
 		instigator_id = instigatorID,
 		instigator = instigatorName,
 		victim_id = victimID,

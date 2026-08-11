@@ -218,9 +218,9 @@ body{padding:18px}.shell{max-width:980px;margin:auto}.hero{position:relative;ove
  </div></section>
 
  <section class="section" id="objectives"><div class="sectionHead"><h2>Contextual objectives</h2><span>OPTIONAL · SERVER GENERATED</span></div><div class="grid">
-  <div class="card wide why"><span class="tag">YOUR NEXT MOVE</span><h3>The server teaches new players through automatic, outcome-driven objectives.</h3><p>Beginner steps are pinned automatically and cover identity, property, Hands, mugging, healing and role pathways. Afterwards, open F4 → Objectives to accept optional activities generated for your role and the current population.</p></div>
+  <div class="card wide why"><span class="tag">YOUR NEXT MOVE</span><h3>The server teaches new players through automatic, outcome-driven objectives.</h3><p>Beginner steps are pinned automatically and cover property, identity, Hands, mugging, healing and role pathways. Afterwards, open F4 → Objectives to accept optional activities generated for your role and the current population.</p></div>
   <div class="card wide">{{BEGINNER_PROGRESS}}</div>
-  <div class="card"><h3>Learn by playing</h3><p>New-player activities introduce RP names, Hands, properties and safe marketplace deliveries without forcing you through a tutorial.</p></div>
+  <div class="card"><h3>Learn by playing</h3><p>Your first objective teaches you to purchase a property. Once established and no longer a Hobo, the next objective sends you to the police-station Councilman to register a name and appearance.</p></div>
   <div class="card"><h3>Role-specific direction</h3><p>Police investigate and book suspects, medics answer calls, criminals resolve structured incidents, merchants deliver orders, owners maintain property and Mayors fund public service.</p></div>
   <div class="card"><h3>Authoritative completion</h3><p>Progress comes from completed server events and incident outcomes—not client claims. Rewards are issued immediately and appear in your XP history.</p></div>
   <div class="card"><h3>Hints never take control</h3><p>Timed hints explain mechanics without buttons or forced responses. Press F3 or Z whenever a HUD interface needs a cursor, then press it again to return to movement.</p></div>
@@ -244,7 +244,7 @@ body{padding:18px}.shell{max-width:980px;margin:auto}.hero{position:relative;ove
  </div></section>
 
  <section class="section" id="crime"><div class="sectionHead"><h2>Crime systems</h2><span>04 · RISK AND RESPONSE</span></div><div class="grid">
-  <div class="card wide"><span class="tag danger">MUGGING</span><h3>A victim must be standing still when the demand begins.</h3><ul><li>As a mugging-capable role, aim at a player and tap <span class="key">M</span>.</li><li>Hold <span class="key">M</span> for three seconds to set the demand, up to $5,000.</li><li>The victim has ten seconds to use <b>/dropmoney amount</b>.</li><li>The victim may initially damage the mugger. Movement, weapon changes, firing or missing the deadline enables mutual PvP.</li></ul></div>
+  <div class="card wide"><span class="tag danger">MUGGING</span><h3>A victim must be standing still when the demand begins.</h3><ul><li>As a mugging-capable role, aim at a player and tap <span class="key">M</span>.</li><li>Hold <span class="key">M</span> for three seconds to choose and issue a demand up to $5,000.</li><li>The victim has ten seconds to pay through the demand panel. They may decide later and reopen it from the HUD with free cursor mode.</li><li>The victim may initially damage the mugger. Movement, weapon changes, firing or missing the deadline enables mutual PvP.</li></ul></div>
   <div class="card"><h3>Becoming a Hitman</h3><p>Reach −325 civic directly, or reach −200 civic and take authenticated ePhone photographs of three different people you personally killed during legitimate incidents. Once qualified, private hit contracts become available.</p></div>
   <div class="card"><h3>Armory and treasury raids</h3><p>Raiders may declare an armory raid for weapon crates or hold the Treasury Vault for reserved public cash. Both use server-owned participants, countdowns, PvP permissions and outcomes.</p></div>
   <div class="card"><h3>Civic consequences</h3><p>Mugging, murder, forced drugging, criminal raids and hits reduce civic standing. The result is visible in your HUD and scoreboard reputation.</p></div>
@@ -286,7 +286,7 @@ body{padding:18px}.shell{max-width:980px;margin:auto}.hero{position:relative;ove
 
  <section class="section" id="controls"><div class="sectionHead"><h2>Essential controls</h2><span>09 · QUICK REFERENCE</span></div><div class="grid">
   <div class="card"><h3>Menus</h3><ul><li><span class="key">F4</span> or <span class="key">I</span> DarkRP menu</li><li><span class="key">Q</span> themed spawn and prop browser</li><li><span class="key">Y</span> local chat</li><li><span class="key">U</span> team chat</li></ul></div>
-  <div class="card"><h3>Identity and items</h3><ul><li><b>/rpname name</b> set RP name</li><li><b>/jobname title</b> customize job title</li><li><b>/drop</b> drop eligible held weapon</li><li><b>/dropmoney amount</b> drop cash</li></ul></div>
+  <div class="card"><h3>Identity and items</h3><ul><li><b>Councilman</b> register your first RP name and appearance</li><li><b>/rpname name</b> update a registered RP name</li><li><b>/jobname title</b> customize job title</li><li><b>/drop</b> drop eligible held weapon</li><li><b>/dropmoney amount</b> drop cash</li></ul></div>
   <div class="card"><h3>Doors and crime</h3><ul><li><span class="key">F</span> buy or sell aimed door</li><li>Keys weapon locks/unlocks controlled doors</li><li><span class="key">M</span> mug; hold to configure amount</li></ul></div>
   <div class="card"><h3>Chat categories</h3><p>The chatbox separates Local, Team and Global. Left-click a category to view only it; right-click toggles it as a filter. Use Up/Down to recall sent messages and right-click any message to copy its text, sender or complete line. New messages follow the bottom unless you are reading earlier chat.</p></div>
   <div class="card"><h3>Local voice</h3><p>Voice chat is proximity-based and uses positional attenuation. Move closer for a clearer conversation; players beyond the configured local range cannot hear you. Dead and living voice are isolated.</p></div>
@@ -305,7 +305,7 @@ document.getElementById('previous').addEventListener('click',function(){show(pag
 </html>]]
 end
 
-local function openMOTDPanel()
+local function openMOTDPanel(joinWelcome)
 	if not DRP.MOTD.enabled or DRP.MOTD.html == "" then
 		if DRP.MOTD.enabled and DRP.MOTD.html == "" then
 			DRP.MOTD.html = "<p>This server has no Message of the Day content yet.</p>"
@@ -318,6 +318,13 @@ local function openMOTDPanel()
 	local frame = DRP.UI.Frame(DRP.MOTD.title or "Server MOTD", math.min(ScrW() - 60, 980), math.min(ScrH() - 60, 760))
 	DRP.MOTD.Frame = frame
 	frame:SetDeleteOnClose(true)
+	if joinWelcome then
+		local previousRemove = frame.OnRemove
+		frame.OnRemove = function(...)
+			if previousRemove then previousRemove(...) end
+			hook.Run("DRPWelcomePanelClosed", "motd")
+		end
+	end
 
 	local html = vgui.Create("DHTML", frame)
 	html:SetPos(12, 62)
@@ -383,7 +390,7 @@ local function queueMOTDOpen()
 		end
 
 		motdAutoShowQueued = false
-		openMOTDPanel()
+		openMOTDPanel(true)
 	end
 	attemptOpen()
 end
@@ -732,7 +739,7 @@ local function openF4Menu()
 		addPageHeading(content, "Commands", "Click any command to copy its syntax to your clipboard.")
 		local scroll = pageScroll()
 		local commands = {
-			{ syntax = "/rpname <name>  /name <name>", detail = "Set your persistent roleplay name." },
+			{ syntax = "/rpname <name>  /name <name>", detail = "Update your persistent roleplay name after first registering with the police-station Councilman." },
 			{ syntax = "/job <police|citizen>", detail = "Join eligible government service or resign back to your earned civic/behavior identity. Other roles cannot be selected." },
 			{ syntax = "/jobname <title>", detail = "Set a custom title for your current job." },
 			{ syntax = "/hands  /handdrop <slot>", detail = "Equip Hands: primary picks up items, secondary opens the grid inventory, reload consumes the selected drug. Legacy pocket commands remain aliases." },

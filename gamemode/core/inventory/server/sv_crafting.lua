@@ -2,7 +2,8 @@ local Crafting = {
 	SchemaVersion = DRP.CraftingShared.SchemaVersion, Recipes = {}, Catalog = {}, Excluded = {}, Profiles = {}, Tables = {}, ByEntity = setmetatable({}, {__mode="k"}),
 	NextTableID = 1, NextJobID = 1, DirtyWorld = false, WorldRevision = 0, DataDirectory = "darkrp/crafting", WorldKey = "crafting:" .. game.GetMap(), OpenViewers=setmetatable({}, {__mode="k"}),
 	MaxQueue = 5, MaxOutputRecords=64, RaidLootDuration = 120, Overrides = {}, BlockedWeapons = { arc9_base=true, arc9_go_base=true },
-	CatalogTransfers = {}, CatalogTransferHead = 1, CatalogChunkSize = 48000, CatalogChunksPerTick = 2, CatalogPumpArmed = false
+	CatalogTransfers = {}, CatalogTransferHead = 1, CatalogChunkSize = 48000, CatalogChunksPerTick = 2, CatalogPumpArmed = false,
+	CatalogHasAttachments = false, ARC9RegisteredAttachmentCount = 0
 }
 -- Gunsmithing progression is intentionally faster than the base recipe XP so
 -- players can reach meaningful crafting tiers without grinding for days.
@@ -223,8 +224,12 @@ function Crafting:BuildCatalog()
 	baseRecipes() buildWeapons() buildAmmunition() buildAttachments()
 	table.sort(self.Catalog,function(a,b) if a.grade==b.grade then return a.name<b.name end return a.grade<b.grade end)
 	local compact={}
+	self.CatalogHasAttachments=false
 	local fingerprintParts={"schema="..tostring(DRP.CraftingShared.SchemaVersion)}
-	for _,r in ipairs(self.Catalog) do compact[#compact+1]={id=r.id,name=r.name,kind=r.kind,category=r.category,grade=r.grade,level=r.level,time=r.time,xp=r.xp,ingredients=r.ingredients,schematic=r.schematic==true,schematic_family=r.schematic_family,requires_equipment=r.requires_equipment,lethal=r.lethal==true,class=r.class,attachment=r.attachment,compatible_weapons=r.compatible_weapons,compatible_weapon_ids=r.compatible_weapon_ids} end
+	for _,r in ipairs(self.Catalog) do
+		if r.kind=="attachment" then self.CatalogHasAttachments=true end
+		compact[#compact+1]={id=r.id,name=r.name,kind=r.kind,category=r.category,grade=r.grade,level=r.level,time=r.time,xp=r.xp,ingredients=r.ingredients,schematic=r.schematic==true,schematic_family=r.schematic_family,requires_equipment=r.requires_equipment,lethal=r.lethal==true,class=r.class,attachment=r.attachment,compatible_weapons=r.compatible_weapons,compatible_weapon_ids=r.compatible_weapon_ids}
+	end
 	for _,r in ipairs(self.Catalog) do local ingredients={} for key,count in SortedPairs(r.ingredients) do ingredients[#ingredients+1]=key.."="..count end fingerprintParts[#fingerprintParts+1]=table.concat({r.id,r.name,r.grade,r.level,r.time,r.xp,r.schematic_family or "",r.requires_equipment or "",table.concat(ingredients,",")},"|") end
 	self.CatalogJSON=util.TableToJSON(compact,false) or "[]"
 	self.CatalogFingerprint=util.CRC(table.concat(fingerprintParts,"\n"))
@@ -235,13 +240,15 @@ function Crafting:CatalogKindCount(kind)
 	local count=0 for _,recipe in ipairs(self.Catalog or {}) do if recipe.kind==kind then count=count+1 end end return count
 end
 function Crafting:RefreshARC9Catalog(force)
+	if not force and self.CatalogHasAttachments then return true end
 	local registered=ARC9 and istable(ARC9.Attachments) and table.Count(ARC9.Attachments) or 0
 	if registered<=0 then return false end
-	if not force and self:CatalogKindCount("attachment")>0 then return true end
+	self.ARC9RegisteredAttachmentCount=registered
 	self:BuildCatalog()
 	for _,ply in player.Iterator() do ply.DRPCraftingCatalogFingerprint=nil end
-	print(string.format("[DRP CRAFTING] ARC9 refresh: registered=%d attachment_recipes=%d total_recipes=%d",registered,self:CatalogKindCount("attachment"),#self.Catalog))
-	return self:CatalogKindCount("attachment")>0
+	local attachmentRecipes=self:CatalogKindCount("attachment")
+	print(string.format("[DRP CRAFTING] ARC9 refresh: registered=%d attachment_recipes=%d total_recipes=%d",registered,attachmentRecipes,#self.Catalog))
+	return self.CatalogHasAttachments
 end
 function Crafting:Recipe(id) return self.Recipes[tostring(id or "")] end
 function Crafting:TrackObjective(ply,recipeID)
@@ -301,8 +308,22 @@ end
 local function weightedGrade(maxGrade)
 	local roll=math.random(1,100) local grade=roll<=50 and 1 or (roll<=78 and 2 or (roll<=92 and 3 or (roll<=98 and 4 or 5))) return math.min(grade,maxGrade or 5)
 end
-function Crafting:GenerateRareLoot(ply,containerKind)
+function Crafting:GenerateSchematicLoot(grade)
+	grade=math.Clamp(math.floor(tonumber(grade) or 1),1,6)
+	local choices={}
+	for _,r in ipairs(self.Catalog) do if r.grade==grade and (r.schematic or r.schematic_family) then choices[#choices+1]=r end end
+	local chosen=table.Random(choices)
+	return chosen and self:SchematicRecord(chosen) or nil
+end
+function Crafting:GenerateRareLoot(ply,containerKind,excludeSchematics)
 	local roll=math.random(1,100) local maxGrade=containerKind=="trashcan" and 3 or 5
+	if excludeSchematics then
+		if roll<=36 then local pool={} for _,key in ipairs(specialist) do local defGrade=key=="bench_vice_drill" and 3 or (key=="rifling_rig" and 4 or 5) if defGrade<=maxGrade then pool[#pool+1]=key end end return #pool>0 and pickRecord(pool,1,1) or pickRecord(refined,1,1)
+		elseif roll<=65 then return pickRecord(precisionComponents,1,1)
+		elseif roll<=84 then return containerKind=="dumpster" and pickRecord(controlledComponents,1,1) or pickRecord(commonComponents,1,1)
+		elseif roll<=97 then local choices={} for _,r in ipairs(self.Catalog) do if r.kind=="attachment" and r.grade<=math.min(2,maxGrade) then choices[#choices+1]=r end end local chosen=table.Random(choices) return chosen and cleanRecord(chosen.output) or pickRecord(commonComponents,1,1)
+		else local choices={} for _,r in ipairs(self.Catalog) do if r.kind=="weapon" and r.grade<=2 and not r.lethal then choices[#choices+1]=r end end local chosen=table.Random(choices) return chosen and cleanRecord(chosen.output) or pickRecord(precisionComponents,1,1) end
+	end
 	if roll<=38 then local grade=weightedGrade(maxGrade) local choices={} for _,r in ipairs(self.Catalog) do if r.grade==grade and (r.schematic or r.schematic_family) then choices[#choices+1]=r end end local chosen=table.Random(choices) return chosen and self:SchematicRecord(chosen) or pickRecord(precisionComponents,1,1)
 	elseif roll<=60 then local pool={} for _,key in ipairs(specialist) do local defGrade=key=="bench_vice_drill" and 3 or (key=="rifling_rig" and 4 or 5) if defGrade<=maxGrade then pool[#pool+1]=key end end return #pool>0 and pickRecord(pool,1,1) or pickRecord(refined,1,1)
 	elseif roll<=78 then return pickRecord(precisionComponents,1,1)
@@ -506,7 +527,7 @@ function Crafting:RegisterTable(entity,propertyID,stableID)
 	end
 	-- Persistent property infrastructure is counted by the production budget,
 	-- but must never inherit the temporary dropped-entity cleanup deadline.
-	entity.DRPCleanupRecord=nil
+	if DRP.Props and DRP.Props.CancelCleanup then DRP.Props:CancelCleanup(entity) end
 	self.NextTableID=math.max(self.NextTableID,tonumber(id) and tonumber(id)+1 or self.NextTableID+1)
 	local r=self.Tables[id] or {id=id,property_id=propertyID,queue={},output={},upgrades={},raid_raiders={}}
 	r.entity=entity r.property_id=propertyID r.owner=(DRP.Properties.Leases[propertyID] and DRP.Properties.Leases[propertyID].owner_id) or r.owner r.position={x=entity:GetPos().x,y=entity:GetPos().y,z=entity:GetPos().z} r.angle={p=entity:GetAngles().p,y=entity:GetAngles().y,r=entity:GetAngles().r}

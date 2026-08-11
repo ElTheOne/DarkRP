@@ -198,6 +198,7 @@ local blockedPrestigeWeapons = {
 	weapon_portalgun = true,
 	ephone = true,
 	weapon_drp_mayor_tablet = true,
+	weapon_drp_police_tablet = true,
 	weapon_drp_persistence_tool = true
 }
 
@@ -336,6 +337,22 @@ function Experience:SetTotalXP(ply, totalXP, source, detail)
 		if reward > 0 then self:AddHistory(ply, reward, source or "admin", detail) end
 	end
 
+	return true
+end
+
+-- Database/admin surfaces edit the persisted XP state through this authority
+-- instead of mutating player fields behind the progression service's back.
+function Experience:SetPersistentField(ply, field, value)
+	if not self:EnsurePlayer(ply) or not ply:DRPReady() then return false, "Player not ready" end
+	field = tostring(field or "")
+	if field == "xp_points" then ply.DRPXPValue = math.max(0, math.floor(tonumber(value) or 0))
+	elseif field == "xp_level" then ply.DRPXPLevelValue = clampUInt(value, 1, self.MaxLevel)
+	elseif field == "xp_prestige" then ply.DRPXPPrestigeValue = clampUInt(value, 0, self.MaxPrestige)
+	elseif field == "xp_prestige_tokens" then ply.DRPXPPrestigeTokensValue = clampUInt(value, 0, self.MaxPrestige)
+	else return false, "Unsupported XP field" end
+	self:QueueSave(ply)
+	DRP.Net.SendProfile(ply)
+	self:SendSnapshot(ply)
 	return true
 end
 

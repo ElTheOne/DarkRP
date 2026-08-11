@@ -148,7 +148,7 @@ end
 -- then merge addon stools discovered from the mounted Lua search path.
 local stoolFiles = {
 	"axis.lua", "balloon.lua", "ballsocket.lua", "button.lua", "camera.lua",
-	"colour.lua", "creator.lua", "drp_property_zone.lua", "duplicator.lua",
+	"colour.lua", "creator.lua", "drp_property_zone.lua", "drp_police_route.lua", "duplicator.lua",
 	"dynamite.lua", "editentity.lua", "elastic.lua", "emitter.lua",
 	"eyeposer.lua", "faceposer.lua", "finger.lua", "hoverball.lua",
 	"hydraulic.lua", "inflator.lua", "lamp.lua", "leafblower.lua", "light.lua",

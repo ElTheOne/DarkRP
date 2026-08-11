@@ -13,7 +13,8 @@ local Contracts = {
 	PendingRefunds = {},
 	RefundPath = "darkrp/contracts_refunds.json",
 	ConfigPath = "darkrp/contracts_config.json",
-	DeliveryTimerName = "DRP.Contracts.Deliveries"
+	DeliveryTimerName = "DRP.Contracts.Deliveries",
+	SyncQueued = false
 }
 
 DRP.Contracts = Contracts
@@ -199,8 +200,22 @@ function Contracts.Sync(ply, open)
 	DRP.Net.Record(#payload + 4)
 end
 
-function Contracts.SyncAll()
+
+function Contracts.SyncAllNow()
+	local started = DRP.Profile and DRP.Profile.Begin and DRP.Profile.Begin() or nil
 	for _, ply in ipairs(DRP.Players.List) do if IsValid(ply) and ply:DRPReady() then Contracts.Sync(ply, false) end end
+	if DRP.Profile and DRP.Profile.Finish then DRP.Profile.Finish("contracts.sync_all", started) end
+end
+
+function Contracts.SyncAll()
+	if Contracts.SyncQueued then return false end
+	Contracts.SyncQueued = true
+	timer.Simple(0, function()
+		if DRP.Contracts ~= Contracts then return end
+		Contracts.SyncQueued = false
+		Contracts.SyncAllNow()
+	end)
+	return true
 end
 
 local function openEditor(ply, listing)
@@ -419,7 +434,7 @@ function Contracts.TryAccept(negotiation)
 			openTrade(negotiation)
 			return false
 		end
-		if not DRP.Economy.Take(buyer, negotiation.offer, "marketplace escrow") then
+		if not DRP.Economy.Take(buyer, negotiation.offer, "marketplace escrow", { kind = "custody", source = "marketplace escrow" }) then
 			notify(buyer, "You cannot afford this trade.", 3)
 			negotiation.buyerConfirmed = false
 			openTrade(negotiation)
@@ -500,7 +515,7 @@ function Contracts.Fulfill(delivery)
 		end
 		removeItemFromListings(item)
 	end
-	if IsValid(seller) then DRP.Economy.Add(seller, delivery.offer, "marketplace delivery completed") end
+	if IsValid(seller) then DRP.Economy.SettleTransfer(seller, delivery.offer, "marketplace delivery completed") end
 	delivery.status = "completed"
 	Contracts.Deliveries[delivery.id] = nil
 	for listingID in pairs(delivery.affectedListingIDs or { [delivery.listingID] = true }) do
@@ -525,7 +540,7 @@ function Contracts.Timeout(delivery, reason, disconnectingBuyerID)
 	local buyer = online(delivery.buyerID)
 	if disconnectingBuyerID == delivery.buyerID then buyer = nil end
 	if IsValid(buyer) then
-		DRP.Economy.Add(buyer, delivery.offer, "marketplace escrow refund")
+		DRP.Economy.Add(buyer, delivery.offer, "marketplace escrow refund", { kind = "custody", source = "marketplace escrow refund" })
 	elseif not delivery.virtualBuyer then
 		Contracts.PendingRefunds[delivery.buyerID] = (Contracts.PendingRefunds[delivery.buyerID] or 0) + delivery.offer
 		Contracts.SaveRefunds()
@@ -755,6 +770,7 @@ end
 
 function Contracts:Stop()
 	self:PrepareShutdown()
+	self.SyncQueued = false
 	timer.Remove(self.DeliveryTimerName)
 end
 
@@ -762,7 +778,7 @@ hook.Add("DRPPlayerReady", "DRP.Contracts.InitialSync", function(ply)
 	local refund = Contracts.PendingRefunds[ply:SteamID64()]
 	if refund and refund > 0 then
 		Contracts.PendingRefunds[ply:SteamID64()] = nil
-		DRP.Economy.Add(ply, refund, "offline marketplace escrow refund")
+		DRP.Economy.Add(ply, refund, "offline marketplace escrow refund", { kind = "custody", source = "marketplace offline escrow refund" })
 		Contracts.SaveRefunds()
 	end
 	Contracts.Sync(ply, false)
@@ -777,7 +793,7 @@ hook.Add("EntityRemoved", "DRP.Contracts.EntityRemoved", function(entity)
 		end
 		if #listing.items == 0 and listing.status ~= "completed" then listing.status = "cancelled" end
 	end
-	timer.Simple(0, function() Contracts.SyncAll() end)
+	Contracts.SyncAll()
 end)
 
 hook.Add("PlayerUse", "DRP.Contracts.LockedEntityUse", function(_, entity)

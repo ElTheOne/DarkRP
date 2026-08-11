@@ -121,8 +121,11 @@ function Properties:ScheduleMemberDeadline(propertyID, memberID)
 		if (current.rent or 0) > 0 and (current.next_rent_unix or 0) <= currentUnix then
 			local tenant = onlinePlayer(memberID)
 			if not IsValid(tenant) or not tenant:DRPPersistent() then return end
-			if DRP.Economy.Take(tenant, current.rent, "rent for " .. self.Definitions[propertyID].name) then
-				self:Credit(currentLease.owner_id, current.rent, "property rent")
+			if DRP.Economy.Take(tenant, current.rent, "rent for " .. self.Definitions[propertyID].name, { kind = "transfer", source = "property rent" }) then
+				local burned, net = 0, current.rent
+				if DRP.EconomyDirector and DRP.EconomyDirector.CalculateTransactionBurn then burned, net = DRP.EconomyDirector:CalculateTransactionBurn(current.rent) end
+				self:Credit(currentLease.owner_id, net, "property rent")
+				if burned > 0 then DRP.EconomyDirector:RecordBurn(burned, "property rent") end
 				current.next_rent_unix = currentUnix + self.RentInterval
 				if DRP.Audit then DRP.Audit.Log(tenant, "property_rent_paid", onlinePlayer(currentLease.owner_id), "#" .. propertyID .. " $" .. current.rent) end
 			else

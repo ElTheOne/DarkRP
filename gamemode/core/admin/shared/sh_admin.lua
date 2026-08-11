@@ -9,7 +9,7 @@ DRP.AdminPermissions = {
 	{ key = "jobs", label = "Override job restrictions" },
 	{ key = "money", label = "Manage player money" },
 	{ key = "experience", label = "Manage player experience" },
-	{ key = "props", label = "Manage prop blacklist" },
+	{ key = "props", label = "Manage player entities and prop blacklist" },
 	{ key = "prop_prices", label = "Manage prop prices" },
 	{ key = "warnings", label = "Issue player warnings" },
 	{ key = "blacklists", label = "Issue and lift player blacklists" },

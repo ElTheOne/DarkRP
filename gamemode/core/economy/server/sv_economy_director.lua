@@ -2,7 +2,7 @@
 -- This service deliberately has no timer or world scan. Mutations arrive through
 -- Economy and registered producers; census/reconciliation is lifecycle-driven.
 local Director = {
-	Version = 1,
+	Version = 2,
 	DataPath = "darkrp/economy_director.json",
 	JournalPath = "darkrp/economy_events.log",
 	StateKey = "economy:director",
@@ -29,7 +29,10 @@ local Director = {
 		healthyMoneyPerActivePlayer = 4800,
 		treasuryRatio = 0.10,
 		maxHourlyMovement = 0.05,
-		marketFee = 0.01
+		marketFee = 0.01,
+		burnStartRatio = 1.25,
+		burnResponse = 0.08,
+		maxTransactionBurn = 0.15
 	},
 	Loaded = false,
 	Dirty = false,
@@ -170,6 +173,19 @@ function Director:RecordMoney(ply, amount, kind, source)
 	return self:Commit(tx)
 end
 
+-- Records money destroyed outside a wallet mutation. Settlement burns use
+-- this after the payer has supplied the gross amount and the recipient has
+-- received only the net amount. This keeps the wallet projection exact while
+-- producing one explicit burn receipt for health reporting and auditing.
+function Director:RecordBurn(amount, source)
+	amount = math.max(0, cleanNumber(amount))
+	if amount <= 0 then return true end
+	local tx = self:BeginTransaction("burn", source or "transaction burn")
+	tx.money = -amount
+	tx.items = { { key = "cash", amount = -amount, owner = "system" } }
+	return self:Commit(tx)
+end
+
 function Director:RecordItem(key, amount, custody, kind, source)
 	key, amount = cleanKey(key), cleanNumber(amount)
 	if not key or amount == 0 then return false end
@@ -258,6 +274,38 @@ function Director:LootFactor(key)
 	return math.Clamp(math.sqrt(target / math.max(.01, tonumber(item.effective or 0))), .25, 2)
 end
 
+function Director:EconomicPressure()
+	local money = self:MoneySummary(true)
+	local healthyMoney = math.max(1, self.Config.healthyMoneyPerActivePlayer * math.max(1, money.onlinePlayers))
+	local moneyRatio = math.max(0, money.effectiveMoney) / healthyMoney
+	local supplyValue, targetSupplyValue = 0, 0
+	for key, item in pairs(self.Holdings) do
+		local target = math.max(0, tonumber(item.target) or 0)
+		local definition = self.Definitions[key]
+		if target > 0 and not (definition and definition.excluded) then
+			local value = self:FairValue(key)
+			supplyValue = supplyValue + math.max(0, tonumber(item.effective) or 0) * value
+			targetSupplyValue = targetSupplyValue + target * value
+		end
+	end
+	local assetRatio = targetSupplyValue > 0 and (supplyValue / targetSupplyValue) or 0
+	return math.max(moneyRatio, assetRatio), moneyRatio, assetRatio, math.floor(supplyValue), math.floor(targetSupplyValue)
+end
+
+function Director:TransactionBurnRate()
+	if self.Config.mode ~= "automatic" then return 0 end
+	local pressure = self:EconomicPressure()
+	local excess = math.max(0, pressure - (tonumber(self.Config.burnStartRatio) or 1.25))
+	return math.Clamp(excess * (tonumber(self.Config.burnResponse) or 0.08), 0, tonumber(self.Config.maxTransactionBurn) or 0.15)
+end
+
+function Director:CalculateTransactionBurn(amount, rateOverride)
+	amount = math.max(0, cleanNumber(amount))
+	local rate = math.Clamp(tonumber(rateOverride) or self:TransactionBurnRate(), 0, tonumber(self.Config.maxTransactionBurn) or 0.15)
+	local burned = math.min(amount, math.floor(amount * rate))
+	return burned, amount - burned, rate
+end
+
 function Director:MoneySummary(allowBriefStale)
 	local minute = math.floor(os.time() / 60)
 	local cached = self.MoneyCache
@@ -295,8 +343,22 @@ function Director:Snapshot()
 	local supply,totalSupplyValue = {},0
 	for key, item in pairs(self.Holdings) do local value=math.max(0,item.effective or 0)*self:FairValue(key) totalSupplyValue=totalSupplyValue+value supply[key] = { exact = item.exact, effective = item.effective, target = item.target, category = item.category, factor = self:LootFactor(key), price = self.Prices[key] and self.Prices[key].multiplier or 1, value=value } end
 	local hourlyMint,hourlyBurn=0,0 local cutoff=os.time()-3600
-	for _,event in ipairs(self.Events) do if (event.time or 0)>=cutoff then if (event.money or 0)>0 then hourlyMint=hourlyMint+event.money elseif (event.money or 0)<0 then hourlyBurn=hourlyBurn-event.money end end end
-	local snapshot = { revision = self.Revision, exactMoney = money.exactMoney, onlineMoney = money.onlineMoney, effectiveMoney = money.effectiveMoney, medianWallet = money.medianWallet, richestWallet = money.richestWallet, richestSteamID64=money.richestSteamID64, richestName=money.richestName, treasury = treasury, dormantCash = money.dormantCash, supply = supply, supplyValue=math.floor(totalSupplyValue), walletGini=money.walletGini, trackedWallets=money.trackedWallets, onlinePlayers=money.onlinePlayers, hourlyMint=hourlyMint, hourlyBurn=hourlyBurn, netHourlyMoney=hourlyMint-hourlyBurn, warnings = self.WarningsList, mitigations={"Commodity loot weights follow live scarcity","Vendor quotes move no more than configured hourly limit","Offline cash receives declining effective weight","No automatic player-balance confiscation"}, journalBytes = self.PendingBytes, lastCensus = self.LastCensus, database = DRP.Storage and DRP.Storage.IsAvailable() or false, mode = self.Config.mode }
+	for _,event in ipairs(self.Events) do
+		if (event.time or 0)>=cutoff then
+			if event.kind=="mint" and (event.money or 0)>0 then hourlyMint=hourlyMint+event.money
+			elseif event.kind=="burn" and (event.money or 0)<0 then hourlyBurn=hourlyBurn-event.money end
+		end
+	end
+	local pressure,moneyRatio,assetRatio,managedSupplyValue,targetSupplyValue=self:EconomicPressure()
+	local burnRate=self:TransactionBurnRate()
+	local bonds=DRP.Bonds and DRP.Bonds:Status() or {}
+	local snapshot = { revision = self.Revision, exactMoney = money.exactMoney, onlineMoney = money.onlineMoney, effectiveMoney = money.effectiveMoney, medianWallet = money.medianWallet, richestWallet = money.richestWallet, richestSteamID64=money.richestSteamID64, richestName=money.richestName, treasury = treasury, dormantCash = money.dormantCash, supply = supply, supplyValue=math.floor(totalSupplyValue), managedSupplyValue=managedSupplyValue, targetSupplyValue=targetSupplyValue, economicPressure=pressure, moneyRatio=moneyRatio, assetRatio=assetRatio, transactionBurnRate=burnRate, walletGini=money.walletGini, trackedWallets=money.trackedWallets, onlinePlayers=money.onlinePlayers, hourlyMint=hourlyMint, hourlyBurn=hourlyBurn, netHourlyMoney=hourlyMint-hourlyBurn, warnings = self.WarningsList, mitigations={"Commodity loot weights follow live scarcity","Vendor quotes move no more than configured hourly limit","Offline cash receives declining effective weight",burnRate>0 and ("Successful transfers burn "..string.format("%.2f",burnRate*100).."%") or "Transaction burn is inactive below the pressure threshold","Existing balances are never confiscated"}, journalBytes = self.PendingBytes, lastCensus = self.LastCensus, database = DRP.Storage and DRP.Storage.IsAvailable() or false, mode = self.Config.mode }
+	snapshot.bondIssuance = bonds.issuance == true
+	snapshot.bondPrincipal = bonds.principal or 0
+	snapshot.bondLiability = bonds.liability or 0
+	snapshot.bondDebt = bonds.debt or 0
+	snapshot.bondDeficit = bonds.deficit or 0
+	snapshot.bondGlobalCap = bonds.globalCap or 0
 	if DRP.Profile and DRP.Profile.Finish then DRP.Profile.Finish("economy.snapshot", started) end
 	return snapshot
 end
@@ -310,6 +372,10 @@ function Director:Warnings(snapshot)
 	if snapshot.treasury < snapshot.exactMoney * .02 and snapshot.exactMoney > 0 then warnings[#warnings + 1] = { key = "treasury", severity = "info", text = "Treasury liquidity is unusually low." } end
 	if snapshot.walletGini>.75 and snapshot.trackedWallets>=5 then warnings[#warnings+1]={key="concentration",severity="warning",text="Wealth concentration is unusually high (Gini "..string.format("%.2f",snapshot.walletGini)..")."} end
 	if snapshot.netHourlyMoney>math.max(10000,snapshot.effectiveMoney*.10) then warnings[#warnings+1]={key="velocity",severity="warning",text="Net money creation during the last hour is unusually high."} end
+	if (snapshot.transactionBurnRate or 0)>0 then warnings[#warnings+1]={key="transaction_burn",severity="info",text="Automatic transaction burning is active at "..string.format("%.2f",snapshot.transactionBurnRate*100).."%."} end
+	if (snapshot.bondDeficit or 0) > 0 then
+		warnings[#warnings + 1] = { key = "bond_deficit", severity = "critical", text = "Government bond liabilities are in deficit by $" .. string.Comma(snapshot.bondDeficit) .. "; new issuance is locked and government revenue is servicing the debt." }
+	end
 	if not snapshot.database then warnings[#warnings+1]={key="database",severity="critical",text="Database is unavailable; local economy and player outboxes are retaining changes."} end
 	for key, item in pairs(self.Holdings) do
 		if item.target > 0 and (item.effective < item.target * .35 or item.effective > item.target * 2.5) then warnings[#warnings + 1] = { key = "supply:" .. key, severity = "warning", text = "Commodity " .. key .. " is outside its healthy supply band." } end
@@ -384,6 +450,9 @@ function Director:SetPolicy(actor, policy)
 	for key, value in pairs(policy) do
 		if key == "mode" and ({ automatic = true, observe = true, frozen = true })[value] then self.Config.mode = value end
 		if key == "healthyMoneyPerActivePlayer" then self.Config.healthyMoneyPerActivePlayer = math.Clamp(cleanNumber(value), 100, 1000000) end
+		if key == "burnStartRatio" then self.Config.burnStartRatio = math.Clamp(tonumber(value) or 1.25, 1, 10) end
+		if key == "burnResponse" then self.Config.burnResponse = math.Clamp(tonumber(value) or 0.08, 0, 1) end
+		if key == "maxTransactionBurn" then self.Config.maxTransactionBurn = math.Clamp(tonumber(value) or 0.15, 0, 0.50) end
 	end
 	if DRP.Audit then DRP.Audit.Log(actor, "economy_policy_changed", nil, util.TableToJSON(policy, false) or "") end
 	self.Dirty = true
@@ -457,7 +526,7 @@ end)
 concommand.Add("drp_economy_status", function(ply)
 	if IsValid(ply) and (not DRP.Admin or not DRP.Admin.IsOwner(ply)) then return end
 	local status = Director:Status()
-	print(string.format("[DRP ECONOMY] revision=%d exact=$%d online=$%d effective=$%d treasury=$%d commodities=%d warnings=%d journal=%dB", status.revision, status.exactMoney, status.onlineMoney, status.effectiveMoney, status.treasury, table.Count(status.supply), #Director:Warnings(status), status.journalBytes))
+	print(string.format("[DRP ECONOMY] revision=%d exact=$%d online=$%d effective=$%d treasury=$%d commodities=%d pressure=%.2fx burn=%.2f%% warnings=%d journal=%dB", status.revision, status.exactMoney, status.onlineMoney, status.effectiveMoney, status.treasury, table.Count(status.supply), status.economicPressure or 0, (status.transactionBurnRate or 0)*100, #Director:Warnings(status), status.journalBytes))
 	if IsValid(ply) then DRP.Net.Notify(ply, "Economy status printed to the server console.", 1) end
 end)
 
